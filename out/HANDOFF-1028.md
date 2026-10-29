@@ -238,3 +238,9 @@ bash work/os3-smoke.sh "" separate  # 分离卡模式
 - 图标从“扁 38x26dp”改为“等比缩放 38x38dp、header 内居中”：scale=1.4615、ty=-24px，
   不改 header/行高/间距；只读探针记录几何。
 - 门禁：light exit=0（12 条独立通知）、像素白带连续 665..2231、iOS exit=0。
+
+## 18. 2026-10-29 追加（0.1.1-beta 发布）
+
+- versionCode=2 / versionName=0.1.1-beta；成品 `out/BetterOriginOS-0.1.1-beta.apk`。
+- 门禁：light exit=0；iOS(separate) exit=0；iOS(ios_stack) exit=0（5f 多胶囊全绿）。
+- 设备：style=light、group_mode=separate、feature=1、verify=0。

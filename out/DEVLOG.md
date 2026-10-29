@@ -1504,3 +1504,13 @@ overlay 直接渲染 N 条子行（数据我们全都有：sbn/标题/正文/图
 - 仅 read-only 探针记录 iconW/H、scale、ty、header/row 高度（verify=1 时）。
 - 复核：`work/os3-smoke-light.sh` exit=0；像素白带仍为连续 665..2231（间距未回退）；
   `work/os3-smoke.sh` exit=0。
+
+## 2026-10-29 · 0.1.1-beta 发布
+
+- 版本：versionCode=2，versionName=0.1.1-beta。
+- 成品：`out/BetterOriginOS-0.1.1-beta.apk`（不是工作树构建目录，便于分发）。
+- 冒烟（全部 exit=0）：
+  - 原生优化样式：`work/z8os3-live/gate_011_light.out`
+  - iOS 样式（separate）：`work/z8os3-live/gate_011_ios.out`
+  - iOS 样式（ios_stack，补 5f 多胶囊）：`work/z8os3-live/gate_011_stack.out`
+- 设备已还原为 light 样式、group_mode=separate、verify=0。
