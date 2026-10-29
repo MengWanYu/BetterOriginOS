@@ -16,9 +16,9 @@
     <string name="feature_notify_title">通知条美化</string>
     <string name="feature_notify_summary">通知条外观风格；iOS 风格为测试版，边界等问题持续维护</string>
     <string name="option_notify_style_title">样式</string>
-    <string name="option_notify_style_summary">iOS：卡片与堆叠（测试版）；原生：恢复 AOSP 默认通知外观</string>
+    <string name="option_notify_style_summary">iOS：卡片与堆叠（测试版）；原生优化：保留系统卡片，只放大图标并优化标题排版</string>
     <string name="notify_style_ios">iOS 风格（测试版）</string>
-    <string name="notify_style_native">原生样式（系统默认）</string>
+    <string name="notify_style_light">原生优化（大图标+标题）</string>
     <string name="option_group_mode_title">分组方式</string>
     <string name="option_group_mode_summary">测试版 iOS 堆叠：同 app 多条折叠成一叠；分离：每条独立成卡</string>
     <string name="group_mode_stack">iOS 折叠堆叠</string>

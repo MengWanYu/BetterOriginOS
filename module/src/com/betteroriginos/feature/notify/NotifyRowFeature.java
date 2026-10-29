@@ -189,8 +189,8 @@ public final class NotifyRowFeature extends Feature {
                 R.string.option_notify_style_title,
                 R.string.option_notify_style_summary,
                 "ios",
-                new String[]{"ios", "native"},
-                new int[]{R.string.notify_style_ios, R.string.notify_style_native},
+                new String[]{"ios", "light"},
+                new int[]{R.string.notify_style_ios, R.string.notify_style_light},
                 null));
         if (STACK_BUILD_ENABLED) {
             options.add(com.betteroriginos.core.FeatureOption.choice(
@@ -222,55 +222,9 @@ public final class NotifyRowFeature extends Feature {
         return options;
     }
 
-    /**
-     * 样式选择：ios = 现有 iOS 卡片/堆叠（测试版）；native = 完全不装通知条钩子，
-     * 通知的排版/绘制/点击全部走 AOSP 原生实现。样式在 Application.onCreate 时读取，
-     * 与设置页“改样式需重启 SystemUI”的约定一致。
-     */
-    private static volatile boolean sGateDone;
-    private static volatile boolean sNativeStyle;
-
     @Override
-    public void install(final ClassLoader cl) {
+    public void install(ClassLoader cl) {
         sClassLoader = cl;
-        XC_MethodHook gate = new XC_MethodHook() {
-            @Override
-            protected void afterHookedMethod(MethodHookParam param) {
-                if (sGateDone || !(param.thisObject instanceof Context)) {
-                    return;
-                }
-                sGateDone = true;
-                Context ctx = (Context) param.thisObject;
-                String style = Prefs.option(ctx, "notify_row", "style", "ios");
-                sNativeStyle = "native".equals(style);
-                Log.i(TAG, "notify_row: style=" + style);
-                if (sNativeStyle) {
-                    Log.i(TAG, "notify_row: native style — AOSP notification pipeline untouched");
-                    if (isVerify(ctx)) {
-                        sVerifyEnabled = true;
-                        installNativeVerifier(cl);
-                    }
-                    return;
-                }
-                installHooks(cl);
-                initFeature(ctx);
-            }
-        };
-        try {
-            Class<?> sysuiApp = XposedHelpers.findClass(
-                    "com.android.systemui.SystemUIApplication", cl);
-            XposedBridge.hookAllMethods(sysuiApp, "onCreate", gate);
-        } catch (Throwable ignored) {
-        }
-        try {
-            Class<?> app = XposedHelpers.findClass("android.app.Application", cl);
-            XposedBridge.hookAllMethods(app, "onCreate", gate);
-        } catch (Throwable t) {
-            Log.w(TAG, "notify_row: style gate hook failed", t);
-        }
-    }
-
-    private static void installHooks(ClassLoader cl) {
         ensureGroupRoot();
         try {
             Class<?> contentView = XposedHelpers.findClass(
@@ -477,110 +431,6 @@ public final class NotifyRowFeature extends Feature {
         }
     }
 
-    /** 原生样式只读校验器：verify=1 时才安装；只读视图状态，不改任何布局/透明度 */
-    private static long sLastNativeVerifyAt;
-
-    private static void installNativeVerifier(ClassLoader cl) {
-        try {
-            Class<?> nss = XposedHelpers.findClass(
-                    "com.android.systemui.statusbar.notification.stack"
-                            + ".NotificationStackScrollLayout", cl);
-            XposedBridge.hookAllMethods(nss, "dispatchDraw", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    if (!sVerifyEnabled || !(param.thisObject instanceof ViewGroup)) {
-                        return;
-                    }
-                    long now = android.os.SystemClock.uptimeMillis();
-                    if (now - sLastNativeVerifyAt < 1000) {
-                        return;
-                    }
-                    sLastNativeVerifyAt = now;
-                    ViewGroup list = (ViewGroup) param.thisObject;
-                    for (int i = 0; i < list.getChildCount(); i++) {
-                        View child = list.getChildAt(i);
-                        if (child.getClass().getSimpleName()
-                                .contains("ExpandableNotificationRow")) {
-                            logNativeRow(child);
-                        }
-                    }
-                }
-            });
-            Log.i(TAG, "notify_row: native verifier installed (read-only)");
-        } catch (Throwable t) {
-            Log.w(TAG, "notify_row: native verifier failed", t);
-        }
-    }
-
-    private static View findDescendant(View v, String simpleName) {
-        if (!(v instanceof ViewGroup)) {
-            return null;
-        }
-        ViewGroup g = (ViewGroup) v;
-        for (int i = 0; i < g.getChildCount(); i++) {
-            View c = g.getChildAt(i);
-            if (c.getClass().getSimpleName().contains(simpleName)) {
-                return c;
-            }
-            View nested = findDescendant(c, simpleName);
-            if (nested != null) {
-                return nested;
-            }
-        }
-        return null;
-    }
-
-    /** 原生渲染的结构证据：无 iOS 覆盖层、原生收起内容/背景都是可见且不透明 */
-    private static void logNativeRow(View row) {
-        try {
-            if (row.getVisibility() != View.VISIBLE || !row.isShown()) {
-                return;
-            }
-            View contentView = findDescendant(row, "NotificationContentView");
-            View root = null;
-            if (contentView != null) {
-                try {
-                    Object contracted = XposedHelpers.getObjectField(
-                            contentView, "mContractedChild");
-                    if (contracted instanceof View) {
-                        root = (View) contracted;
-                    }
-                } catch (Throwable ignored) {
-                }
-            }
-            int overlay = 0;
-            if (contentView instanceof ViewGroup) {
-                ViewGroup g = (ViewGroup) contentView;
-                for (int i = 0; i < g.getChildCount(); i++) {
-                    if (g.getChildAt(i).getClass().getSimpleName()
-                            .contains("IosNotificationRow")) {
-                        overlay++;
-                    }
-                }
-            }
-            View bg = findClass(row, "NotificationBackgroundView");
-            View icon = root == null ? null : root.findViewById(android.R.id.icon);
-            View header = root == null ? null : findClass(root, "NotificationHeaderView");
-            boolean media = findClass(row, "MediaNotificationView") != null;
-            Log.i(TAG, "notify_row.native rowId=" + Integer.toHexString(
-                    System.identityHashCode(row))
-                    + " tag=" + (root == null ? "null" : String.valueOf(root.getTag()))
-                    + " media=" + (media ? 1 : 0)
-                    + " overlay=" + overlay
-                    + " rootAlpha=" + (root == null ? -1f : root.getAlpha())
-                    + " rootVis=" + (root == null ? -1 : root.getVisibility())
-                    + " iconAlpha=" + (icon == null ? -1f : icon.getAlpha())
-                    + " iconVis=" + (icon == null ? -1 : icon.getVisibility())
-                    + " headerAlpha=" + (header == null ? -1f : header.getAlpha())
-                    + " headerVis=" + (header == null ? -1 : header.getVisibility())
-                    + " bgAlpha=" + (bg == null ? -1f : bg.getAlpha())
-                    + " bgVis=" + (bg == null ? -1 : bg.getVisibility())
-                    + " rowW=" + row.getWidth() + " rowH=" + row.getHeight());
-        } catch (Throwable t) {
-            Log.w(TAG, "notify_row: native verify failed", t);
-        }
-    }
-
     /**
      * 现场见证：列表级单趟遍历，记录屏幕上**当前这一帧真实存在**的行实例与呈现状态。
      * 逐行度量用的是绑定时捕获的视图引用，行一旦换实例，那份快照就是陈旧的 ——
@@ -643,6 +493,21 @@ public final class NotifyRowFeature extends Feature {
         sb.append(" ty=").append((int) row.getTranslationY());
         sb.append(" h=").append(row.getHeight());
         sb.append(" vis=").append(row.getVisibility());
+        try {
+            View bg = findClass(row, "NotificationBackgroundView");
+            if (bg != null) {
+                int[] rl = new int[2];
+                int[] bl = new int[2];
+                row.getLocationOnScreen(rl);
+                bg.getLocationOnScreen(bl);
+                sb.append(" rowY=").append(rl[1])
+                        .append(" bgY=").append(bl[1])
+                        .append(" bgH=").append(bg.getHeight())
+                        .append(" bgVis=").append(bg.getVisibility())
+                        .append(" bgA=").append(bg.getAlpha());
+            }
+        } catch (Throwable ignored) {
+        }
         IosNotificationRow card = STACK_CARDS.get(row);
         sb.append(" card=").append(card == null ? 0 : 1);
         sb.append(" cardH=").append(card == null ? -1 : card.getHeight());
@@ -1115,6 +980,10 @@ public final class NotifyRowFeature extends Feature {
      */
     private static final WeakHashMap<View, Boolean> SHELF_RADIUS_LOGGED = new WeakHashMap<>();
     private static final WeakHashMap<View, Boolean> SHELF_FORCED = new WeakHashMap<>();
+    private static final java.util.concurrent.atomic.AtomicBoolean ROUNDNESS_LIGHT_LOGGED =
+            new java.util.concurrent.atomic.AtomicBoolean();
+    private static final java.util.concurrent.atomic.AtomicBoolean LIGHT_METRICS_LOGGED =
+            new java.util.concurrent.atomic.AtomicBoolean();
     private static final WeakHashMap<Object, Boolean> SHELF_DRAWABLE_LOGGED = new WeakHashMap<>();
     private static final WeakHashMap<View, Boolean> SHELF_ENTER_LOGGED = new WeakHashMap<>();
     private static final WeakHashMap<View, Boolean> NSS_SWEEP_LOGGED = new WeakHashMap<>();
@@ -1406,15 +1275,19 @@ public final class NotifyRowFeature extends Feature {
 
     private static void initFeature(Context ctx) {
         boolean enabled = Prefs.featureEnabled(ctx, "notify_row", false);
-        boolean stack = enabled && isStackMode(ctx);
+        boolean light = enabled && isLightStyle(ctx);
+        boolean stack = enabled && !light && isStackMode(ctx);
         boolean verify = isVerify(ctx);
         sStackMode = stack;
-        sUngroupEnabled = enabled && !stack;
+        sUngroupEnabled = enabled && !light && !stack;
         sVerifyEnabled = verify;
         IosNotificationRow.traceFrames = verify;
         registerReverify(ctx);
+        if (light) {
+            Log.i(TAG, "notify_row: light style, native list metrics/spacing");
+        }
         Log.i(TAG, "notify_row: init enabled=" + enabled + " stack=" + stack
-                + " verify=" + verify + " native=" + sNativeStyle);
+                + " verify=" + verify);
     }
 
     private static void initUngroupFlag(final ClassLoader cl) {
@@ -1493,6 +1366,7 @@ public final class NotifyRowFeature extends Feature {
                         }
                         Context ctx = (Context) param.args[0];
                         if (!Prefs.featureEnabled(ctx, "notify_row", false)
+                                || isLightStyle(ctx)
                                 || !"ios".equals(Prefs.option(ctx, "notify_row",
                                 "stack_metrics", "ios"))) {
                             return;
@@ -1703,6 +1577,12 @@ public final class NotifyRowFeature extends Feature {
                                 "stack_metrics", "ios"))) {
                             return;
                         }
+                        if (isLightStyle(ctx)) {
+                            if (ROUNDNESS_LIGHT_LOGGED.compareAndSet(false, true)) {
+                                Log.i(TAG, "notify_row: roundness untouched (light style)");
+                            }
+                            return;
+                        }
                         param.args[0] = (float) NotifyRowSpec.dp(ctx, 20);
                     } catch (Throwable ignored) {
                     }
@@ -1733,6 +1613,12 @@ public final class NotifyRowFeature extends Feature {
         try {
             Context ctx = stack.getContext();
             if (!Prefs.featureEnabled(ctx, "notify_row", false)) {
+                return;
+            }
+            if (isLightStyle(ctx)) {
+                if (LIGHT_METRICS_LOGGED.compareAndSet(false, true)) {
+                    Log.i(TAG, "notify_row: light keeps native list metrics");
+                }
                 return;
             }
             if (!"ios".equals(Prefs.option(ctx, "notify_row", "stack_metrics", "ios"))) {
@@ -2279,6 +2165,90 @@ public final class NotifyRowFeature extends Feature {
         return childCountOf(rowView);
     }
 
+    /**
+     * 原生优化（light）：不改 native 的 header 高度/内边距/文字位置，只放大原生 header 图标、
+     * 调整标题字号；分组摘要/子行、HeadsUp、媒体行一律不动。这样行高与间距仍由 AOSP 自己决定，
+     * 不会出现空白内容或大间隔。
+     */
+    private static void applyLightPolish(View contentView, View root, boolean headsup) {
+        try {
+            Context ctx = root.getContext();
+            if (!(root instanceof FrameLayout) || !(contentView instanceof ViewGroup)) {
+                return;
+            }
+            View rowView = rowOf(contentView);
+            if (rowView == null || headsup) {
+                return;
+            }
+            if (bool(rowView, "isSummaryWithChildren")
+                    || bool(rowView, "isChildInGroup") || inChildrenContainer(rowView)) {
+                return;
+            }
+            Object tag = root.getTag();
+            String style = tag == null ? "" : tag.toString();
+            if (!"base".equals(style) && !"big".equals(style) && !"bigText".equals(style)
+                    && !"inbox".equals(style) && !"bigPicture".equals(style)) {
+                return;
+            }
+            Object wrapper = XposedHelpers.getObjectField(contentView, "mContractedWrapper");
+            String wrapperName = wrapper == null ? "" : wrapper.getClass().getName();
+            if (wrapperName.contains("CustomViewWrapper") || wrapperName.contains("Media")
+                    || wrapperName.contains("ConversationTemplate")
+                    || wrapperName.contains("CallTemplate")) {
+                return;
+            }
+            StatusBarNotification sbn = sbnOf(rowView);
+            if (sbn == null || sbn.getNotification() == null) {
+                return;
+            }
+            Notification n = sbn.getNotification();
+            if (Notification.CATEGORY_TRANSPORT.equals(n.category)
+                    || (n.extras != null
+                    && n.extras.getParcelable(Notification.EXTRA_MEDIA_SESSION) != null)
+                    || androidView(root, "media_actions") != null) {
+                return;
+            }
+            TextView title = text(root, "title");
+            TextView body = firstText(root, "text", "big_text", "always");
+            CharSequence titleText = title == null ? null : title.getText();
+            CharSequence bodyText = body != null && body != title ? body.getText() : null;
+            if (TextUtils.isEmpty(titleText) && TextUtils.isEmpty(bodyText)) {
+                Log.i(TAG, "notify_row: light skip blank row pkg=" + sbn.getPackageName());
+                return;
+            }
+            int big = 0;
+            View icon = findClass(root, "CachingIconView");
+            if (icon instanceof ImageView) {
+                ViewGroup.LayoutParams lp = icon.getLayoutParams();
+                if (lp != null) {
+                    int size = NotifyRowSpec.dp(ctx, 32);
+                    if (lp.width != size || lp.height != size) {
+                        lp.width = size;
+                        lp.height = size;
+                        icon.setLayoutParams(lp);
+                    }
+                }
+                ((ImageView) icon).setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+                icon.setAlpha(1f);
+                big = 1;
+            }
+            if (title != null) {
+                title.setTextSize(TypedValue.COMPLEX_UNIT_SP, NotifyRowSpec.TITLE_TEXT_SP);
+                title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            }
+            // 图标/标题变化会改行高：必须通知列表重排，否则 StackScrollAlgorithm 仍按旧高度
+            // 定位，表现为行重叠或大间隔
+            contentView.requestLayout();
+            refreshRowLayout(rowView);
+            Log.i(TAG, "notify_row: restyled light pkg=" + sbn.getPackageName()
+                    + " bigIcon=" + big + " geo=native"
+                    + " titleLen=" + (titleText == null ? 0 : titleText.length())
+                    + " bodyLen=" + (bodyText == null ? 0 : bodyText.length()));
+        } catch (Throwable t) {
+            Log.w(TAG, "notify_row: light polish failed", t);
+        }
+    }
+
     private static void restyle(View contentView, View root) {
         restyle(contentView, root, false);
     }
@@ -2289,6 +2259,10 @@ public final class NotifyRowFeature extends Feature {
             dropOverlay(contentView);
             dropStackOverlay(contentView, rowOf(contentView));
             RESTYLED.remove(contentView);
+            return;
+        }
+        if (isLightStyle(ctx)) {
+            applyLightPolish(contentView, root, headsup);
             return;
         }
         sStackMode = isStackMode(ctx);
@@ -2541,7 +2515,17 @@ public final class NotifyRowFeature extends Feature {
                     currentExpanded(contentView) == root, headsup, 0);
         }
         Log.i(TAG, "notify_row: restyled pkg=" + sbn.getPackageName() + " style=" + style
-                + (groupChild ? " groupChild" : " single") + (headsup ? " headsup" : ""));
+                + (groupChild ? " groupChild" : " single") + (headsup ? " headsup" : "")
+                + " bigIcon=" + (icon.getDrawable() != null ? 1 : 0));
+    }
+
+    /** light = 原生优化：保留 AOSP/vivo 原卡片与分组，只做 38dp 大图标 + 标题排版 */
+    private static boolean isLightStyle(Context ctx) {
+        try {
+            return "light".equals(Prefs.option(ctx, "notify_row", "style", "ios"));
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     private static boolean isStackMode(Context ctx) {
@@ -3416,6 +3400,11 @@ public final class NotifyRowFeature extends Feature {
         try {
             Context ctx = root.getContext();
             if (!isEnabledStatic(ctx)) {
+                return;
+            }
+            if (isLightStyle(ctx)) {
+                // 原生优化不盖自绘消息卡
+                dropOverlay(contentView);
                 return;
             }
             StatusBarNotification sbn = sbnOf(rowView);

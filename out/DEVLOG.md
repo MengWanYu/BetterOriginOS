@@ -1431,3 +1431,64 @@ overlay 直接渲染 N 条子行（数据我们全都有：sbn/标题/正文/图
   点选原生后 `settings get` 返回 `native`，重启 SystemUI 后零钩子生效。
 
 构建 sha256 前缀：`b6c0ed9d8a5a`。设备当前样式=native、verify=0。
+
+## 2026-10-29 · 样式语义修正 + 原生优化（大图标/标题）落地
+
+### 语义修正
+
+- 原「原生样式」实现被证实与“关闭通知条美化总开关”等价，属冗余，已删除该取值与零钩子门闩。
+- 现在的语义：
+  - 总开关关闭 = 系统默认（原生）；
+  - 总开关开启 + 样式 iOS = 现有卡片/堆叠（测试版）；
+  - 总开关开启 + 样式「原生优化」= 保留系统卡片/背景/分组，只做 38dp 大图标 + 标题排版。
+
+### 原生优化实现（NotifyRowFeature）
+
+- `style=light` 分支：跳过 `applyRowRoundness`、跳过堆叠/消息 overlay/堆叠参数；
+  分组摘要与分组子行一律保持原生（不重排、不切圆角），只优化独立通知。
+- A13 `setTop/BottomRoundness` 钩子按样式分流：light 下不再强制 20dp
+  （修复“同 app 多条通知被切圆角，与上方应用标签栏割裂”）。
+- 空白行防护：标题与正文都为空的行不做 restyle，保留原生渲染（避免纯白空卡）。
+- restyle 日志补充 `bigIcon=/light=` 标记，便于代码级验收。
+
+### 冒烟（全部代码日志断言，无截图验收）
+
+- `work/os3-smoke-light.sh` 连续两次 **exit=0**：独立通知 6~8 条完成大图标/标题排版、
+  `bigIcon=1` 同数、无堆叠/overlay、`stackMode=0`、分组子行零重排、原生圆角保留、
+  空内容行零接管；SystemUI pid 稳定、crash buffer 干净。
+- iOS 回归 `work/os3-smoke.sh` **exit=0**（5d/5e 全绿；5f 本轮 stack toggle=0 未覆盖）。
+
+构建 sha256 前缀：`3c1739527992`。设备当前 style=light、feature=1、verify=0。
+
+## 2026-10-29 · 原生优化样式返工（去掉排版手术，修复空白/大间隔）
+
+- 现象：轻量样式出现空白通知、通知间大间隔。
+- 根因（几何取证）：
+  1) 沿用了 iOS 的 header/标题排版手术（header 高 36dp、topContent topMargin、标题列位移），
+     把原生行从 275~317px 撑到 394~468px；列表仍按原生高度排位 → 视觉大间隔/内容压空。
+  2) 改动行内图标/文字后没有通知 StackScrollAlgorithm 行高变化，行距按旧缓存计算。
+- 返工（真正最小改动）：
+  - light 在 restyle 最前分流到 `applyLightPolish`：不挂重影守卫、不标记 RESTYLED、
+    不改 header 高度/内边距/文字位置，只在原生 header 内把 CachingIconView 调到 32dp，
+    并设置标题字号/字重。
+  - 分组摘要/子行、HeadsUp、媒体/自定义模板行一律保持原生；标题正文皆空的行不接管。
+  - 末尾 `refreshRowLayout(row)` + `contentView.requestLayout()` 通知列表重算行高。
+- 几何对照（同一批通知）：轻量 279/321/573/682px vs 原生基线 275/317/569/682px（基本一致）。
+- 门禁：`work/os3-smoke-light.sh` 连续两次 exit=0（12/10 条独立通知放大图标、geo=native、
+  分组子行零重排、无空内容接管）；iOS `work/os3-smoke.sh` exit=0（5f 因 group_mode=separate 未覆盖）。
+
+## 2026-10-29 · 原生优化样式间距修复（iOS stack metrics 全局污染）
+
+- 现象：轻量样式下空白已消失，但相邻通知之间固定 25px 缝隙；原生 OS3 是连续白板。
+- 取证：同一列像素白带——原生 665..2231 连续；轻量 707..983 / 1008..1286 / 1311..1589
+  （每条之间 25px）。
+- 根因：`installStackMetricsHooks` 在 NSS 构造/updateSidePadding/reinitView 与
+  StackScrollAlgorithm.initView 上全局套用 iOS 参数（8dp 间距、16dp 缩进），只判断了
+  功能开关与 stack_metrics，没有按样式分流。轻量样式虽然不画 iOS 卡，但列表间距被改成 iOS 值。
+- 修复：`applyStackMetrics` 与算法 initView 钩子加 `isLightStyle` 早退；轻量样式保留
+  AOSP/vivo 原生间距与边距。initFeature 增加 `light style, native list metrics/spacing` 声明供门禁断言。
+- 复核：轻量像素白带恢复为 665..2231 连续（与原生一致）；`work/os3-smoke-light.sh`
+  连续两次 exit=0（新增“原生列表间距/边距”断言，8~12 条独立通知放大图标）；
+  iOS `work/os3-smoke.sh` exit=0。
+
+构建 sha256 前缀：`468624aa939d`。设备 style=light、feature=1、verify=0。

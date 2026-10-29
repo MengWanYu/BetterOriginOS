@@ -206,3 +206,29 @@ bash work/os3-smoke.sh "" separate  # 分离卡模式
   `work/os3-smoke.sh` exit=0。只读 verifier 仅在 verify=1 且 style=native 时临时安装。
 - 样式弹窗经 uiautomator 层级确认双选项；点选原生后设置键为 `native`。
 - 媒体卡属独立功能，不随通知条样式切换（原生样式下媒体行仍由 media_card 功能决定）。
+
+## 14. 2026-10-29 追加（样式语义修正 + 原生优化样式）
+
+- 装机包 sha256 前缀 **`3c1739527992`**。
+- 删除“原生=零钩子”路径（与总开关关闭等价）；现在：关闭总开关=系统默认，
+  开启后样式可选 iOS（测试版）或「原生优化（大图标+标题）」。
+- 原生优化：保留系统卡片/背景/圆角与原生分组；独立通知做 38dp 大图标+标题排版；
+  分组摘要/子行完全不重排（修复与标签栏割裂）；标题正文皆空的行不接管（防纯白空卡）。
+- A13 圆角钩子按样式分流，light 不再强推 20dp。
+- 门禁：`work/os3-smoke-light.sh` 连续两次 exit=0；`work/os3-smoke.sh` exit=0。
+- 设备：style=light、feature=1、verify=0。当前改动尚未提交 git（初始提交为 a25313f）。
+
+## 15. 2026-10-29 追加（原生优化样式返工）
+
+- 轻量样式不再复用 iOS 排版手术：仅放大原生 header 图标 + 调标题字号，原生几何/行高全部保留；
+  改动后调用 refreshRowLayout 通知列表更新行高。
+- 分组摘要/子行、HeadsUp、媒体行保持原生；空内容行不接管。修复此前空白与大间隔。
+- 门禁：work/os3-smoke-light.sh 两次 exit=0；work/os3-smoke.sh exit=0（5f 因 separate 未覆盖）。
+- 构建 sha256 前缀 `3c1739527992`。
+
+## 16. 2026-10-29 追加（轻量样式间距修复）
+
+- 轻量样式 25px 缝隙根因：iOS 的 stack metrics（8dp 间距/16dp 缩进）在 NSS/算法层全局生效，
+  未按样式分流。已在 applyStackMetrics 与 StackScrollAlgorithm.initView 钩子加 light 早退。
+- 复核：轻量像素白带与原生一致（665..2231 连续）；light 门禁两次 exit=0；iOS 门禁 exit=0。
+- 构建 sha256 前缀 `468624aa939d`；设备保持 style=light、feature=1、verify=0。
