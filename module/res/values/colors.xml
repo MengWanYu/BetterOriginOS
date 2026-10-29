@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- OS5 tokens（逆向自本机 com.android.settings 的 vivo_card_style_* 与真机取色） -->
+    <color name="bg_page">#F2F2F5</color>
+    <color name="bg_card">#FFFFFF</color>
+    <color name="text_primary">#DE000000</color>
+    <color name="text_secondary">#61000000</color>
+    <color name="text_tertiary">#42000000</color>
+    <color name="section_label">#78000000</color>
+    <color name="divider">#D9D9D9</color>
+
+    <color name="accent">#0F77FF</color>
+    <color name="accent_soft">#1A0F77FF</color>
+    <color name="brand">#E0503A</color>
+
+    <color name="track_off">#E3E5EA</color>
+    <color name="switch_thumb">#FFFFFF</color>
+    <color name="sheet_scrim">#52000000</color>
+    <color name="search_field">#EAEAEE</color>
+
+    <color name="ic_launcher_background">#E0503A</color>
+    <color name="white">#FFFFFF</color>
+    <color name="black">#000000</color>
+</resources>

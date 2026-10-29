@@ -1,0 +1,42 @@
+# ---- build outputs / binaries ----
+module/build/
+demo/build/
+**/__pycache__/
+*.apk
+*.dex
+*.i64
+*.dump
+*.class
+
+# ---- keystores (build.sh regenerates) ----
+*.keystore
+
+# ---- heavy reference / decompiled / downloaded artifacts ----
+work/systemui/
+work/os5-ref/
+work/sdk-dl/
+work/z8os3-live/
+work/shots/
+work/hyperceiler-src/
+work/hyperceiler-apk/
+work/aar-appcompat/
+work/tmp-javac/
+work/*.log
+work/*.png
+work/*.xml
+!work/settings-test.xml
+module/ui-*.xml
+module/build*.txt
+module/build.log
+
+# ---- reference library raw assets ----
+vivo-OriginUI/ref/
+vivo-OriginUI/evidence/
+vivo-OriginUI/demo/
+
+# ---- editor / OS ----
+.DS_Store
+Thumbs.db
+
+# qoder chat artifacts
+.qoder/app/

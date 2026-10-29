@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="vivo_page_margin">20dp</dimen>
+    <dimen name="vivo_card_radius">12dp</dimen>
+    <dimen name="vivo_row_height">56dp</dimen>
+    <dimen name="vivo_row_height_summary">64dp</dimen>
+    <dimen name="vivo_topbar_large">84dp</dimen>
+    <dimen name="vivo_topbar_compact">56dp</dimen>
+    <dimen name="vivo_search_height">52dp</dimen>
+    <dimen name="vivo_bottom_bar">66dp</dimen>
+    <dimen name="vivo_button_xl">46dp</dimen>
+    <dimen name="vivo_button_m">32dp</dimen>
+    <dimen name="vivo_button_s">24dp</dimen>
+    <dimen name="vivo_switch_width">40dp</dimen>
+    <dimen name="vivo_switch_height">20dp</dimen>
+</resources>
