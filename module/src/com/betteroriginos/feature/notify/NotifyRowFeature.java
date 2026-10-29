@@ -2217,12 +2217,12 @@ public final class NotifyRowFeature extends Feature {
                 return;
             }
             int big = 0;
-            View icon = findClass(root, "CachingIconView");
+            final View icon = findClass(root, "CachingIconView");
             if (icon instanceof ImageView) {
                 ViewGroup.LayoutParams lp = icon.getLayoutParams();
                 if (lp != null) {
-                    int size = NotifyRowSpec.dp(ctx, 32);
-                    if (lp.width != size || lp.height != size) {
+                    int size = NotifyRowSpec.dp(ctx, 38);
+                    if (lp.width != size) {
                         lp.width = size;
                         lp.height = size;
                         icon.setLayoutParams(lp);
@@ -2230,6 +2230,28 @@ public final class NotifyRowFeature extends Feature {
                 }
                 ((ImageView) icon).setScaleType(ImageView.ScaleType.CENTER_INSIDE);
                 icon.setAlpha(1f);
+                // Header 会把图标高度压到 26dp；按实际绘制尺寸等比放大到 38dp 并
+                // 在 header 内垂直居中（只改 scale/translation，不动 header 布局）
+                final View header = findClass(root, "NotificationHeaderView");
+                icon.post(() -> {
+                    try {
+                        int drawn = Math.min(icon.getWidth(), icon.getHeight());
+                        int target = NotifyRowSpec.dp(icon.getContext(), 38);
+                        if (drawn <= 0 || target <= 0) {
+                            return;
+                        }
+                        float scale = target / (float) drawn;
+                        icon.setPivotX(icon.getWidth() / 2f);
+                        icon.setPivotY(icon.getHeight() / 2f);
+                        icon.setScaleX(scale);
+                        icon.setScaleY(scale);
+                        if (header != null) {
+                            int iconCenter = icon.getTop() + icon.getHeight() / 2;
+                            icon.setTranslationY(header.getHeight() / 2 - iconCenter);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                });
                 big = 1;
             }
             if (title != null) {
@@ -2240,6 +2262,58 @@ public final class NotifyRowFeature extends Feature {
             // 定位，表现为行重叠或大间隔
             contentView.requestLayout();
             refreshRowLayout(rowView);
+            if (sVerifyEnabled) {
+                final View probeRoot = root;
+                final View probeRow = rowView;
+                final String probePkg = sbn.getPackageName();
+                rowView.postDelayed(() -> {
+                    try {
+                        View hdr = findClass(probeRoot, "NotificationHeaderView");
+                        View ic = findClass(probeRoot, "CachingIconView");
+                        int[] il = new int[2];
+                        int[] hl = new int[2];
+                        int[] rl = new int[2];
+                        if (ic != null) ic.getLocationOnScreen(il);
+                        if (hdr != null) hdr.getLocationOnScreen(hl);
+                        probeRow.getLocationOnScreen(rl);
+                        String pcls = "null";
+                        int ph = -1, plpW = -1, plpH = -1, pclip = -1;
+                        if (ic != null && ic.getParent() instanceof View) {
+                            View pv = (View) ic.getParent();
+                            pcls = pv.getClass().getSimpleName();
+                            ph = pv.getHeight();
+                            if (pv.getLayoutParams() != null) {
+                                plpW = pv.getLayoutParams().width;
+                                plpH = pv.getLayoutParams().height;
+                            }
+                            if (pv instanceof ViewGroup) {
+                                pclip = ((ViewGroup) pv).getClipChildren() ? 1 : 0;
+                            }
+                        }
+                        int ilpW = -1, ilpH = -1;
+                        if (ic != null && ic.getLayoutParams() != null) {
+                            ilpW = ic.getLayoutParams().width;
+                            ilpH = ic.getLayoutParams().height;
+                        }
+                        Log.i(TAG, "notify_row.light.icon pkg=" + probePkg
+                                + " iconW=" + (ic == null ? -1 : ic.getWidth())
+                                + " iconH=" + (ic == null ? -1 : ic.getHeight())
+                                + " ilp=" + ilpW + "x" + ilpH
+                                + " parent=" + pcls + "/" + ph
+                                + " plp=" + plpW + "x" + plpH + " pclip=" + pclip
+                                + " iconX=" + (ic == null ? -1 : il[0] - rl[0])
+                                + " iconY=" + (ic == null ? -1 : il[1] - rl[1])
+                                + " icScale=" + (ic == null ? -1f : ic.getScaleX())
+                                + " icTY=" + (ic == null ? -1f : ic.getTranslationY())
+                                + " hdrH=" + (hdr == null ? -1 : hdr.getHeight())
+                                + " hdrY=" + (hdr == null ? -1 : hl[1] - rl[1])
+                                + " rowH=" + probeRow.getHeight()
+                                + " clipB=" + XposedHelpers.getIntField(probeRow,
+                                        "mClipBottomAmount"));
+                    } catch (Throwable ignored) {
+                    }
+                }, 500);
+            }
             Log.i(TAG, "notify_row: restyled light pkg=" + sbn.getPackageName()
                     + " bigIcon=" + big + " geo=native"
                     + " titleLen=" + (titleText == null ? 0 : titleText.length())

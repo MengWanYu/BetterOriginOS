@@ -1492,3 +1492,15 @@ overlay 直接渲染 N 条子行（数据我们全都有：sbn/标题/正文/图
   iOS `work/os3-smoke.sh` exit=0。
 
 构建 sha256 前缀：`468624aa939d`。设备 style=light、feature=1、verify=0。
+
+## 2026-10-29 · 原生优化样式：大图标显示优化
+
+- 原生 header 会把图标高度压到 26dp（实测 CachingIconView 114x78px，改 LP 只加宽不加高），
+  直接设 38dp 会得到“扁图标”。改为按实际绘制尺寸等比缩放并保持 header 不动：
+  - LP 宽度设 38dp（保证槽位宽度）；
+  - post 后按 `target/实际绘制尺寸` 设置 scaleX/Y（真机 114/78=1.4615），pivot 居中，
+    再按 header 高度垂直居中（translationY=-24px）；
+  - 视觉结果 38×38dp、header 内上下各 6px 余量，行高与列表间距完全不变。
+- 仅 read-only 探针记录 iconW/H、scale、ty、header/row 高度（verify=1 时）。
+- 复核：`work/os3-smoke-light.sh` exit=0；像素白带仍为连续 665..2231（间距未回退）；
+  `work/os3-smoke.sh` exit=0。

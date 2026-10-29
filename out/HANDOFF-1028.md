@@ -232,3 +232,9 @@ bash work/os3-smoke.sh "" separate  # 分离卡模式
   未按样式分流。已在 applyStackMetrics 与 StackScrollAlgorithm.initView 钩子加 light 早退。
 - 复核：轻量像素白带与原生一致（665..2231 连续）；light 门禁两次 exit=0；iOS 门禁 exit=0。
 - 构建 sha256 前缀 `468624aa939d`；设备保持 style=light、feature=1、verify=0。
+
+## 17. 2026-10-29 追加（原生优化大图标）
+
+- 图标从“扁 38x26dp”改为“等比缩放 38x38dp、header 内居中”：scale=1.4615、ty=-24px，
+  不改 header/行高/间距；只读探针记录几何。
+- 门禁：light exit=0（12 条独立通知）、像素白带连续 665..2231、iOS exit=0。
