@@ -10,6 +10,7 @@ import android.database.ContentObserver;
 import android.os.Bundle;
 import android.os.Parcelable;
 import android.text.format.DateUtils;
+import android.graphics.Outline;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
@@ -24,6 +25,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
+import android.view.ViewOutlineProvider;
 import android.view.ViewTreeObserver;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -56,6 +58,23 @@ public final class NotifyRowFeature extends Feature {
     private static final String STACK_TEST_KEY = "betteroriginos_notify_stack_test";
     private static final String SCROLL_TEST_KEY = "betteroriginos_notify_scroll_test";
     private static final String TAG_ICON = "betteroriginos_notify_icon";
+    private static final String TAG_LIGHT_BIG = "betteroriginos_notify_light_big";
+    private static final int LIGHT_TITLE_RAISE_DP = 8;
+    private static final int LIGHT_ICON_DP = 42;
+    private static final int LIGHT_ICON_CORNER_DP = 11;
+    private static final WeakHashMap<View, View> LIGHT_NATIVE_ICON = new WeakHashMap<>();
+    private static final WeakHashMap<View, int[]> LIGHT_ICON_LP = new WeakHashMap<>();
+    private static final WeakHashMap<View, ViewTreeObserver> LIGHT_ICON_GUARD =
+            new WeakHashMap<>();
+    private static final WeakHashMap<View, int[]> LIGHT_COLUMN_BOX = new WeakHashMap<>();
+    private static final WeakHashMap<View, Integer> LIGHT_COLUMN_HEADER =
+            new WeakHashMap<>();
+    private static final WeakHashMap<View, Integer> LIGHT_COLUMN_MARGIN =
+            new WeakHashMap<>();
+    private static final WeakHashMap<View, ViewTreeObserver> LIGHT_MORPH_GUARD =
+            new WeakHashMap<>();
+    private static final WeakHashMap<View, ViewTreeObserver> STACK_GUARD_VTO =
+            new WeakHashMap<>();
     private static final int COLLAPSED_MAX_DP = 200;
     private static final WeakHashMap<View, Boolean> RESTYLED = new WeakHashMap<>();
     private static final WeakHashMap<View, Boolean> RESTYLED_ROWS = new WeakHashMap<>();
@@ -2165,14 +2184,257 @@ public final class NotifyRowFeature extends Feature {
         return childCountOf(rowView);
     }
 
+    /** 摘掉原生优化的大图标，并还原被隐藏的原生 header 小图标 */
+    private static void clearLightBigIcon(View root) {
+        View nativeIcon = LIGHT_NATIVE_ICON.remove(root);
+        if (nativeIcon != null) {
+            nativeIcon.setAlpha(1f);
+            int[] old = LIGHT_ICON_LP.remove(nativeIcon);
+            if (old != null) {
+                ViewGroup.LayoutParams lp = nativeIcon.getLayoutParams();
+                if (lp != null) {
+                    lp.width = old[0];
+                    lp.height = old[1];
+                    nativeIcon.setLayoutParams(lp);
+                }
+            }
+        }
+        if (root instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) root;
+            for (int i = g.getChildCount() - 1; i >= 0; i--) {
+                View c = g.getChildAt(i);
+                if (TAG_LIGHT_BIG.equals(c.getTag())) {
+                    g.removeViewAt(i);
+                }
+            }
+        }
+    }
+
     /**
-     * 原生优化（light）：不改 native 的 header 高度/内边距/文字位置，只放大原生 header 图标、
-     * 调整标题字号；分组摘要/子行、HeadsUp、媒体行一律不动。这样行高与间距仍由 AOSP 自己决定，
-     * 不会出现空白内容或大间隔。
+     * OS5 light：原生收起行的标题/正文从 12dp 起排，会被左侧 38dp 大图标压住；
+     * 按 iOS 卡同一列（66dp）右移，header 的应用名/时间也对齐到同一列。
+     * 行会被复用，最终内边距记在 view 上，重复调用不会累加。
      */
+    private static void alignLightColumn(Context ctx, View root, TextView anchor) {
+        try {
+            View box = null;
+            if (anchor != null) {
+                // 只给文字列加偏移；展开视图里 header 与文字列可能共用一个父容器，
+                // 加到父容器会把应用名一起推走
+                box = androidView(root, "notification_main_column");
+                if (box == null) {
+                    View topContent = directChildOf(root, anchor);
+                    box = topContent == null ? anchor
+                            : directChildOf(topContent, anchor);
+                    if (box == null) {
+                        box = anchor;
+                    }
+                }
+                int[] pad = LIGHT_COLUMN_BOX.get(box);
+                if (pad == null) {
+                    int target = NotifyRowSpec.dp(ctx, NotifyRowSpec.COLUMN_DP);
+                    int endTarget = NotifyRowSpec.dp(ctx, 16);
+                    pad = new int[]{
+                            box.getPaddingStart()
+                                    + Math.max(0, target - startOffset(root, anchor)),
+                            box.getPaddingEnd()
+                                    + Math.max(0, endTarget - endOffset(root, anchor))};
+                    LIGHT_COLUMN_BOX.put(box, pad);
+                }
+                box.setPaddingRelative(pad[0], box.getPaddingTop(),
+                        pad[1], box.getPaddingBottom());
+                // 收起态标题上提必须走布局：translation 会把标题顶进 header 被盖住。
+                // 找到真正带 topMargin 的文字容器（headerless column/row），减 8dp；
+                // header 同步压到 34dp，二者不会重叠。
+                View marginView = findTopMarginContainer(box,
+                        NotifyRowSpec.dp(ctx, LIGHT_TITLE_RAISE_DP));
+                if (marginView != null) {
+                    ViewGroup.LayoutParams blp = marginView.getLayoutParams();
+                    if (blp instanceof ViewGroup.MarginLayoutParams) {
+                        ViewGroup.MarginLayoutParams mlp = (ViewGroup.MarginLayoutParams) blp;
+                        Integer origTop = LIGHT_COLUMN_MARGIN.get(marginView);
+                        if (origTop == null) {
+                            origTop = mlp.topMargin;
+                            LIGHT_COLUMN_MARGIN.put(marginView, origTop);
+                        }
+                        mlp.topMargin = Math.max(0,
+                                origTop - NotifyRowSpec.dp(ctx, LIGHT_TITLE_RAISE_DP));
+                        marginView.setLayoutParams(mlp);
+                    }
+                }
+            }
+
+            View header = findClass(root, "NotificationHeaderView");
+            if (header != null) {
+                Integer padStart = LIGHT_COLUMN_HEADER.get(header);
+                if (padStart == null) {
+                    int iconW = 0;
+                    int iconEnd = 0;
+                    View nativeIcon = LIGHT_NATIVE_ICON.get(root);
+                    if (nativeIcon != null) {
+                        iconW = NotifyRowSpec.dp(ctx, 16);
+                        ViewGroup.LayoutParams lp = nativeIcon.getLayoutParams();
+                        if (lp != null && lp.width > 0) {
+                            iconW = lp.width;
+                        }
+                        if (lp instanceof ViewGroup.MarginLayoutParams) {
+                            iconEnd = ((ViewGroup.MarginLayoutParams) lp).getMarginEnd();
+                        }
+                    }
+                    padStart = Math.max(header.getPaddingStart(),
+                            NotifyRowSpec.dp(ctx, NotifyRowSpec.COLUMN_DP) - iconW - iconEnd);
+                    LIGHT_COLUMN_HEADER.put(header, padStart);
+                }
+                header.setPaddingRelative(padStart, header.getPaddingTop(),
+                        header.getPaddingEnd(), header.getPaddingBottom());
+                ViewGroup.LayoutParams hlp = header.getLayoutParams();
+                if (hlp != null) {
+                    int h = NotifyRowSpec.dp(ctx, NotifyRowSpec.HEADER_HEIGHT_DP);
+                    if (hlp.height != h) {
+                        hlp.height = h;
+                        header.setLayoutParams(hlp);
+                    }
+                }
+                if (sVerifyEnabled) {
+                    Log.i(TAG, "notify_row.light.geo hdrH=" + header.getHeight()
+                            + " hdrLp=" + lpInfo(header) + " boxLp=" + lpInfo(box));
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 从文字列往上找真正负责"距 header 多远"的容器（topMargin 足够大的那一层） */
+    private static View findTopMarginContainer(View start, int need) {
+        View cur = start;
+        for (int i = 0; i < 4 && cur != null; i++) {
+            ViewGroup.LayoutParams lp = cur.getLayoutParams();
+            if (lp instanceof ViewGroup.MarginLayoutParams
+                    && ((ViewGroup.MarginLayoutParams) lp).topMargin >= need) {
+                return cur;
+            }
+            ViewParent p = cur.getParent();
+            cur = p instanceof View ? (View) p : null;
+        }
+        return null;
+    }
+
+    private static String lpInfo(View v) {
+        ViewGroup.LayoutParams lp = v == null ? null : v.getLayoutParams();
+        if (lp == null) {
+            return "null";
+        }
+        String s = lp.width + "x" + lp.height;
+        if (lp instanceof ViewGroup.MarginLayoutParams) {
+            ViewGroup.MarginLayoutParams m = (ViewGroup.MarginLayoutParams) lp;
+            s += " m=" + m.leftMargin + "," + m.topMargin + ","
+                    + m.rightMargin + "," + m.bottomMargin;
+        }
+        return s;
+    }
+
+    /** OS5 light：图标对齐到标题→正文的文字块中心；空摘要行保持整行居中 */
+    private static void alignLightIcon(View root, View icon, int size) {
+        try {
+            TextView title = text(root, "title");
+            TextView body = firstText(root, "text", "big_text", "always");
+            View topV = title != null ? title : body;
+            View bottomV = body != null && body != title ? body : title;
+            if (topV == null || bottomV == null
+                    || topV.getHeight() <= 0 || bottomV.getHeight() <= 0) {
+                return;
+            }
+            int[] tl = new int[2];
+            int[] bl = new int[2];
+            int[] rl = new int[2];
+            topV.getLocationOnScreen(tl);
+            bottomV.getLocationOnScreen(bl);
+            root.getLocationOnScreen(rl);
+            int top = tl[1] - rl[1];
+            int bottom = bl[1] - rl[1] + bottomV.getHeight();
+            int desired = (top + bottom - size) / 2;
+            int max = Math.max(0, root.getHeight() - size);
+            desired = Math.max(0, Math.min(desired, max));
+            icon.setTranslationY(desired - icon.getTop());
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 原生图标隐藏的逐帧兜底：原生更新可能把 small icon alpha 写回 1 */
+    private static void guardLightNativeIcon(final View root) {
+        final ViewTreeObserver vto = root.getViewTreeObserver();
+        synchronized (LIGHT_ICON_GUARD) {
+            ViewTreeObserver old = LIGHT_ICON_GUARD.get(root);
+            if (old == vto && vto.isAlive()) {
+                return;
+            }
+            LIGHT_ICON_GUARD.put(root, vto);
+        }
+        vto.addOnPreDrawListener(preDrawGuard(() -> {
+            View ni = LIGHT_NATIVE_ICON.get(root);
+            if (ni != null && ni.getAlpha() != 0f) {
+                ni.setAlpha(0f);
+            }
+        }));
+    }
+
+    /** light 的展开/收起图标飞行：同一枚 38dp 图标从收起位连续移动到展开位 */
+    private static void guardLightMorph(final View contentView) {
+        final ViewTreeObserver vto = contentView.getViewTreeObserver();
+        synchronized (LIGHT_MORPH_GUARD) {
+            if (LIGHT_MORPH_GUARD.get(contentView) == vto && vto.isAlive()) {
+                return;
+            }
+            LIGHT_MORPH_GUARD.put(contentView, vto);
+        }
+        vto.addOnPreDrawListener(preDrawGuard(() -> {
+            ImageView flying;
+            synchronized (FLIGHT) {
+                flying = FLIGHT.get(contentView);
+            }
+            // 展开动画会重新排列 contentView 的子视图，飞行图标必须逐帧置顶
+            if (flying != null && flying.getVisibility() == View.VISIBLE
+                    && contentView instanceof ViewGroup) {
+                ViewGroup cv = (ViewGroup) contentView;
+                if (cv.indexOfChild(flying) != cv.getChildCount() - 1) {
+                    cv.bringChildToFront(flying);
+                }
+            }
+            View row = rowOf(contentView);
+            if (row == null) {
+                return;
+            }
+            boolean open = bool(row, "isExpanded");
+            Boolean prev;
+            synchronized (ROW_OPEN) {
+                prev = ROW_OPEN.get(contentView);
+                ROW_OPEN.put(contentView, open);
+            }
+            if (prev == null || prev.booleanValue() == open) {
+                return;
+            }
+            View contracted = currentContracted(contentView);
+            View expanded = currentExpanded(contentView);
+            if (sVerifyEnabled) {
+                Log.i(TAG, "notify_row.light.morph flip open=" + open
+                        + " con=" + (contracted != null)
+                        + " exp=" + (expanded != null)
+                        + " conIcon=" + (contracted != null && iconOf(contracted) != null)
+                        + " expIcon=" + (expanded != null && iconOf(expanded) != null));
+            }
+            if (contracted != null && expanded != null) {
+                morphIcon(contentView, contracted, expanded, open, null);
+            }
+        }));
+    }
+
     private static void applyLightPolish(View contentView, View root, boolean headsup) {
         try {
+            clearLightBigIcon(root);
             Context ctx = root.getContext();
+            // OS5 原生行已是「16dp 小图标 + 独立文字列」，大图标按 iOS 内容区度量放置；
+            // OS3 的 header 槽位窄，沿用原来的留宽 + 原生位置方案。
+            final boolean iosColumn = !OsProfile.isA13OrLower();
             if (!(root instanceof FrameLayout) || !(contentView instanceof ViewGroup)) {
                 return;
             }
@@ -2180,8 +2442,9 @@ public final class NotifyRowFeature extends Feature {
             if (rowView == null || headsup) {
                 return;
             }
-            if (bool(rowView, "isSummaryWithChildren")
-                    || bool(rowView, "isChildInGroup") || inChildrenContainer(rowView)) {
+            // OS5 上同应用多条通知会被系统自动归组；light 也要覆盖摘要和子行
+            if (!iosColumn && (bool(rowView, "isSummaryWithChildren")
+                    || bool(rowView, "isChildInGroup") || inChildrenContainer(rowView))) {
                 return;
             }
             Object tag = root.getTag();
@@ -2190,7 +2453,13 @@ public final class NotifyRowFeature extends Feature {
                     && !"inbox".equals(style) && !"bigPicture".equals(style)) {
                 return;
             }
-            Object wrapper = XposedHelpers.getObjectField(contentView, "mContractedWrapper");
+            Object wrapper = null;
+            try {
+                wrapper = XposedHelpers.getObjectField(contentView,
+                        currentExpanded(contentView) == root
+                                ? "mExpandedWrapper" : "mContractedWrapper");
+            } catch (Throwable ignored) {
+            }
             String wrapperName = wrapper == null ? "" : wrapper.getClass().getName();
             if (wrapperName.contains("CustomViewWrapper") || wrapperName.contains("Media")
                     || wrapperName.contains("ConversationTemplate")
@@ -2213,42 +2482,110 @@ public final class NotifyRowFeature extends Feature {
             CharSequence titleText = title == null ? null : title.getText();
             CharSequence bodyText = body != null && body != title ? body.getText() : null;
             if (TextUtils.isEmpty(titleText) && TextUtils.isEmpty(bodyText)) {
-                Log.i(TAG, "notify_row: light skip blank row pkg=" + sbn.getPackageName());
-                return;
+                // OS5 的自动归组摘要是系统生成的空正文行；header 仍要套大图标排版
+                if (!iosColumn) {
+                    Log.i(TAG, "notify_row: light skip blank row pkg=" + sbn.getPackageName());
+                    return;
+                }
+            }
+            if (iosColumn) {
+                sVerifyEnabled = isVerify(ctx);
+                // 展开/收起时让同一枚大图标连续飞过去，而不是两个子视图各画一枚硬切
+                ensureFlight(contentView);
+                guardLightMorph(contentView);
             }
             int big = 0;
-            final View icon = findClass(root, "CachingIconView");
-            if (icon instanceof ImageView) {
-                ViewGroup.LayoutParams lp = icon.getLayoutParams();
-                if (lp != null) {
-                    int size = NotifyRowSpec.dp(ctx, 38);
-                    if (lp.width != size) {
-                        lp.width = size;
-                        lp.height = size;
-                        icon.setLayoutParams(lp);
+            final View nativeIcon = findClass(root, "CachingIconView");
+            // OS5 展开视图可能没有 CachingIconView，大图标照样要建；OS3 仍只在找到原生图标时接管
+            if (nativeIcon != null || iosColumn) {
+                int size = NotifyRowSpec.dp(ctx, iosColumn ? LIGHT_ICON_DP : 38);
+                // OS3：让 native header 给 38dp 图标留出槽位宽度（高度仍由 header 决定，
+                // 但小图标会被隐藏，不再缩放它）。OS5 保持原生槽位不动，避免 header 文字位移。
+                if (!iosColumn && nativeIcon != null) {
+                    ViewGroup.LayoutParams nlp = nativeIcon.getLayoutParams();
+                    if (nlp != null && nlp.width != size) {
+                        if (!LIGHT_ICON_LP.containsKey(nativeIcon)) {
+                            LIGHT_ICON_LP.put(nativeIcon, new int[]{nlp.width, nlp.height});
+                        }
+                        nlp.width = size;
+                        nativeIcon.setLayoutParams(nlp);
                     }
                 }
-                ((ImageView) icon).setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-                icon.setAlpha(1f);
-                // Header 会把图标高度压到 26dp；按实际绘制尺寸等比放大到 38dp 并
-                // 在 header 内垂直居中（只改 scale/translation，不动 header 布局）
+                ImageView bigIcon = new ImageView(ctx);
+                bigIcon.setTag(TAG_LIGHT_BIG);
+                bigIcon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                bigIcon.setClipToOutline(true);
+                final int corner = NotifyRowSpec.dp(ctx, iosColumn
+                        ? LIGHT_ICON_CORNER_DP : NotifyRowSpec.ICON_CORNER_DP);
+                bigIcon.setOutlineProvider(new ViewOutlineProvider() {
+                    @Override
+                    public void getOutline(View view, Outline outline) {
+                        outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), corner);
+                    }
+                });
+                Drawable appDrawable = appIcon(ctx, sbn.getPackageName());
+                if (appDrawable == null && nativeIcon instanceof ImageView) {
+                    appDrawable = ((ImageView) nativeIcon).getDrawable();
+                }
+                bigIcon.setImageDrawable(appDrawable);
+                bigIcon.setClickable(true);
+                bigIcon.setFocusable(false);
+                bigIcon.setImportantForAccessibility(
+                        View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                final View rowRef = rowView;
+                bigIcon.setOnClickListener(v -> rowRef.performClick());
+                bigIcon.setOnLongClickListener(v -> longClickRow(rowRef));
+                ((ViewGroup) root).addView(bigIcon,
+                        new FrameLayout.LayoutParams(size, size));
+                // OS5：42dp 应用图标放左侧 16dp；纵向对齐在布局后按标题→正文文字块居中
+                if (iosColumn) {
+                    FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(size, size);
+                    flp.gravity = Gravity.CENTER_VERTICAL | Gravity.START;
+                    flp.setMarginStart(NotifyRowSpec.dp(ctx, NotifyRowSpec.GUTTER_DP));
+                    bigIcon.setLayoutParams(flp);
+                }
+                if (nativeIcon != null) {
+                    nativeIcon.setAlpha(0f);
+                    LIGHT_NATIVE_ICON.put(root, nativeIcon);
+                    guardLightNativeIcon(root);
+                }
                 final View header = findClass(root, "NotificationHeaderView");
-                icon.post(() -> {
+                final View rootRef = root;
+                final View iconRef = bigIcon;
+                iconRef.post(() -> {
                     try {
-                        int drawn = Math.min(icon.getWidth(), icon.getHeight());
-                        int target = NotifyRowSpec.dp(icon.getContext(), 38);
-                        if (drawn <= 0 || target <= 0) {
+                        if (iosColumn) {
+                            alignLightIcon(rootRef, iconRef, size);
+                            iconRef.bringToFront();
                             return;
                         }
-                        float scale = target / (float) drawn;
-                        icon.setPivotX(icon.getWidth() / 2f);
-                        icon.setPivotY(icon.getHeight() / 2f);
-                        icon.setScaleX(scale);
-                        icon.setScaleY(scale);
-                        if (header != null) {
-                            int iconCenter = icon.getTop() + icon.getHeight() / 2;
-                            icon.setTranslationY(header.getHeight() / 2 - iconCenter);
+                        if (nativeIcon == null) {
+                            iconRef.bringToFront();
+                            return;
                         }
+                        int[] il = new int[2];
+                        int[] rl = new int[2];
+                        nativeIcon.getLocationOnScreen(il);
+                        rootRef.getLocationOnScreen(rl);
+                        int left = il[0] - rl[0];
+                        int top;
+                        if (header != null) {
+                            int[] hl = new int[2];
+                            header.getLocationOnScreen(hl);
+                            top = hl[1] - rl[1]
+                                    + Math.max(0, (header.getHeight() - size) / 2);
+                        } else {
+                            top = Math.max(0, (rootRef.getHeight() - size) / 2);
+                        }
+                        if (il[0] == 0 && il[1] == 0) {
+                            // 尚未 attach/布局：退回相对坐标
+                            left = nativeIcon.getLeft();
+                            top = header == null ? 0 : header.getTop()
+                                    + Math.max(0, (header.getHeight() - size) / 2);
+                        }
+                        iconRef.setX(left);
+                        iconRef.setY(top);
+                        iconRef.bringToFront();
                     } catch (Throwable ignored) {
                     }
                 });
@@ -2257,6 +2594,9 @@ public final class NotifyRowFeature extends Feature {
             if (title != null) {
                 title.setTextSize(TypedValue.COMPLEX_UNIT_SP, NotifyRowSpec.TITLE_TEXT_SP);
                 title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            }
+            if (iosColumn) {
+                alignLightColumn(ctx, root, title != null ? title : body);
             }
             // 图标/标题变化会改行高：必须通知列表重排，否则 StackScrollAlgorithm 仍按旧高度
             // 定位，表现为行重叠或大间隔
@@ -2315,7 +2655,7 @@ public final class NotifyRowFeature extends Feature {
                 }, 500);
             }
             Log.i(TAG, "notify_row: restyled light pkg=" + sbn.getPackageName()
-                    + " bigIcon=" + big + " geo=native"
+                    + " bigIcon=" + big + " geo=" + (iosColumn ? "ios-column" : "native")
                     + " titleLen=" + (titleText == null ? 0 : titleText.length())
                     + " bodyLen=" + (bodyText == null ? 0 : bodyText.length()));
         } catch (Throwable t) {
@@ -2339,6 +2679,7 @@ public final class NotifyRowFeature extends Feature {
             applyLightPolish(contentView, root, headsup);
             return;
         }
+        clearLightBigIcon(root);
         sStackMode = isStackMode(ctx);
         sUngroupEnabled = !sStackMode;
         sVerifyEnabled = isVerify(ctx);
@@ -2756,9 +3097,10 @@ public final class NotifyRowFeature extends Feature {
             restoreStackedViews(rowView);
         }
         ViewTreeObserver.OnPreDrawListener guard = STACK_GUARDS.remove(contentView);
-        if (guard != null) {
+        ViewTreeObserver guardVto = STACK_GUARD_VTO.remove(contentView);
+        if (guard != null && guardVto != null && guardVto.isAlive()) {
             try {
-                contentView.getViewTreeObserver().removeOnPreDrawListener(guard);
+                guardVto.removeOnPreDrawListener(guard);
             } catch (Throwable ignored) {
             }
         }
@@ -2938,15 +3280,30 @@ public final class NotifyRowFeature extends Feature {
     private static void guardStack(final View contentView, final View rowView,
                                    final View root, final IosNotificationRow overlay,
                                    final View bg) {
+        final ViewTreeObserver vto = contentView.getViewTreeObserver();
         synchronized (STACK_GUARDS) {
-            if (STACK_GUARDS.containsKey(contentView)) {
+            ViewTreeObserver.OnPreDrawListener bound = STACK_GUARDS.get(contentView);
+            ViewTreeObserver boundVto = STACK_GUARD_VTO.get(contentView);
+            if (bound != null && boundVto == vto && vto.isAlive()) {
                 return;
             }
+            // VTO 会随 attach 合并/换实例：按旧实例摘监听会失败，留下"孤儿守卫"继续把
+            // 复用行压成 alpha 0（空白卡）。先按记录的真实 VTO 摘干净再重挂。
+            if (bound != null && boundVto != null && boundVto.isAlive()) {
+                boundVto.removeOnPreDrawListener(bound);
+            }
+            STACK_GUARDS.remove(contentView);
+            STACK_GUARD_VTO.remove(contentView);
         }
         ViewTreeObserver.OnPreDrawListener guard = new ViewTreeObserver.OnPreDrawListener() {
                     @Override
                     public boolean onPreDraw() {
                       try {
+                        if (!STACK_OVERLAYS.containsKey(contentView)
+                                || overlay.getParent() == null) {
+                            // 堆叠卡已被摘掉：不能继续压透明/隐藏子容器，否则复用行会空白
+                            return true;
+                        }
                         // 每帧都从活视图树解析：行会被重新绑定甚至换实例，捕获引用会指向废弃实例，
                         // 之前"以为收起/以为展开"的假象都来自这里
                         View rowView = rowOf(contentView);
@@ -3060,7 +3417,8 @@ public final class NotifyRowFeature extends Feature {
                     }
                 };
         STACK_GUARDS.put(contentView, guard);
-        contentView.getViewTreeObserver().addOnPreDrawListener(guard);
+        STACK_GUARD_VTO.put(contentView, vto);
+        vto.addOnPreDrawListener(guard);
     }
 
     /**
@@ -3444,6 +3802,22 @@ public final class NotifyRowFeature extends Feature {
     /** 行复用为非聊天通知/功能关闭时，移除曾经叠加的 iOS 聊天行 */
     private static void dropOverlay(View contentView) {
         IosNotificationRow overlay = OVERLAYS.remove(contentView);
+        // overlay 活着时把原生根压成了 alpha 0；摘卡必须还原，否则行复用后只剩白底（空白卡）
+        View overlayRoot = currentContracted(contentView);
+        if (overlayRoot == null) {
+            for (View r : new java.util.ArrayList<>(OVERLAY_ROOTS.keySet())) {
+                if (r != null && contentViewOf(r) == contentView) {
+                    overlayRoot = r;
+                    break;
+                }
+            }
+        }
+        if (overlayRoot != null && OVERLAY_ROOTS.remove(overlayRoot) != null) {
+            overlayRoot.setAlpha(1f);
+            overlayRoot.setVisibility(View.VISIBLE);
+            overlayRoot.setImportantForAccessibility(
+                    View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
+        }
         OVERLAY_VERIFY_PENDING.remove(contentView);
         synchronized (OVERLAY_FADE_TO) {
             OVERLAY_FADE_TO.remove(contentView);
@@ -3507,11 +3881,18 @@ public final class NotifyRowFeature extends Feature {
                 }
             }
             final View row = rowView;
+            CharSequence convTitle = conversationTitle(n);
+            CharSequence convMessage = latestMessage(n);
+            if (TextUtils.isEmpty(convTitle) && TextUtils.isEmpty(convMessage)) {
+                // 没有会话标题/正文：不接管，保留原生渲染，避免自绘空卡
+                dropOverlay(contentView);
+                return;
+            }
             overlay.bind(appIcon(ctx, sbn.getPackageName()),
                     appLabel(ctx, sbn.getPackageName()),
                     relativeTime(sbn.getPostTime()),
-                    conversationTitle(n),
-                    latestMessage(n),
+                    convTitle,
+                    convMessage,
                     NotifyRowSpec.night(ctx),
                     v -> row.performClick(),
                     v -> longClickRow(row));
@@ -4945,6 +5326,9 @@ public final class NotifyRowFeature extends Feature {
 
     private static ImageView iconOf(View root) {
         View v = root.findViewWithTag(TAG_ICON);
+        if (!(v instanceof ImageView)) {
+            v = root.findViewWithTag(TAG_LIGHT_BIG);
+        }
         return v instanceof ImageView ? (ImageView) v : null;
     }
 

@@ -244,3 +244,28 @@ bash work/os3-smoke.sh "" separate  # 分离卡模式
 - versionCode=2 / versionName=0.1.1-beta；成品 `out/BetterOriginOS-0.1.1-beta.apk`。
 - 门禁：light exit=0；iOS(separate) exit=0；iOS(ios_stack) exit=0（5f 多胶囊全绿）。
 - 设备：style=light、group_mode=separate、feature=1、verify=0。
+
+## 19. 2026-10-30 追加（离线修复，待真机验证）
+
+- iOS 空白卡根因：dropOverlay 未还原 overlay 期间的 root.alpha=0；已还原 alpha/visible/a11y，
+  并对空会话内容跳过 overlay。
+- 原生优化大图标：不再缩放 header 小图标，改为独立 38dp 应用图标覆盖在原生图标槽位；
+  小图标隐藏、槽位宽度 38dp、header 布局与行高不变；点击/长按转发原生行。
+- 离线构建通过；设备被占用，尚未跑 light/iOS 门禁与空白复现。
+
+## 20. 2026-10-30 追加（离线审计第二批）
+
+- 修复 guardStack 孤儿守卫：记录真实 VTO，换实例时先摘旧监听；守卫每帧检查 overlay 是否还在，
+  避免继续把复用行压成 alpha 0（iOS 空白）。
+- 轻量大图标：槽位 LP 可还原、屏幕坐标定位、原生小图标 alpha 逐帧兜底。
+- 构建通过；设备仍被占用，门禁未跑。0.1.1-beta zip 未包含这些修复。
+
+- 追加：轻量 polish 跳过展开子视图，展开态保持原生。离线构建 `2680ac1b723a`，未装机验证。
+
+## 21. 2026-11-02 OS5 主系统适配（light）
+
+- Z8 主系统为 OriginOS 5 / Android 15；此前验证都在 OS3 DSU。
+- light 在 OS5 改为：42dp 彩色应用图标 + 66dp 文字列，覆盖展开行与自动归组行。
+- 标题上提用布局实现（header 34dp + 文字容器 topMargin -8dp），避免 translation 被 header 遮挡。
+- 展开/收起复用 iOS morph（240ms spring），仅 OS5 启用；OS3 light 行为不变。
+- 装机 sha256 `650ff4cd4539…`，style=light、verify=0；UI 树与 morph 日志已核验。

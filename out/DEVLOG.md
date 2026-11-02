@@ -1514,3 +1514,63 @@ overlay 直接渲染 N 条子行（数据我们全都有：sbn/标题/正文/图
   - iOS 样式（separate）：`work/z8os3-live/gate_011_ios.out`
   - iOS 样式（ios_stack，补 5f 多胶囊）：`work/z8os3-live/gate_011_stack.out`
 - 设备已还原为 light 样式、group_mode=separate、verify=0。
+
+## 2026-10-30 · 离线修复：iOS 空白卡 + 原生优化大图标改为独立 38dp 应用图标
+
+### iOS「完全分离」空白通知（代码级根因）
+
+- `applyMessagingOverlay` 接管消息行时把原生收起根压成 `root.alpha=0`；
+  但 `dropOverlay()` 只移除自绘覆盖层，**从未把 root.alpha/visible/a11y 还原**，
+  `OVERLAY_ROOTS` 也只有 put、没有消费。行被复用或覆盖层被摘掉后，原生内容保持
+  alpha=0，只剩行背景 → 纯白空卡。
+- 修复：
+  1) `dropOverlay()` 摘卡时按 root 还原 alpha=1 / VISIBLE / a11y=AUTO；
+  2) 会话标题与正文都为空时不接管（dropOverlay 后保留原生渲染），避免自绘空卡。
+
+### 原生优化大图标（此前实现错误）
+
+- 旧实现拿 header 左上角的 `CachingIconView` 等比放大。探针证实它是原生小图标，
+  且 header 将其高度压到 78px（26dp），放大后既不是应用大图标、也非正方形。
+- 新实现：在原生 header 的图标槽位内放一个独立的 38dp `ImageView`：
+  - 使用 `PackageManager` 的应用图标（与 iOS 卡同一来源）；
+  - 原生小图标 alpha=0 但保留槽位宽度（LP width=38dp），header 文字位置不动；
+  - 圆角 10dp（clipToOutline）、可点击/长按（转发行原生点击与菜单）；
+  - 布局后按 header 居中定位；行不被判定为可优化时自动摘除并还原小图标。
+- 构建通过（离线），真机门禁待设备空闲后执行。
+
+## 2026-10-30 · 离线审计补充（孤儿守卫 / 图标槽位还原 / 每帧兜底）
+
+- iOS 再次排除一类空白风险：`guardStack` 的 preDraw 守卫没有“卡片是否还在”的成员判断，
+  且 VTO 变化时按新实例摘监听会失败，可能留下孤儿守卫继续把复用行压成 alpha 0。
+  修复：记录 guard 实际挂载的 VTO（STACK_GUARD_VTO），换 VTO 时按真实实例摘除并重挂；
+  守卫每帧先检查 `STACK_OVERLAYS` 与 overlay parent，卡片不在就不再改动视图。
+- 原生优化大图标：
+  - 修改原生小图标槽位宽度后记录原 LP，行不再符合条件时恢复宽度/高度，避免 header 文字长期偏移；
+  - 大图标定位改用屏幕坐标（不再假设小图标是 header 直系子视图），未 attach 时回退相对坐标；
+  - 增加原生小图标 alpha 的逐帧兜底，防止原生更新把它写回 1 后与小图标重叠。
+- 复核：`dropOverlay` 已还原 alpha/visible/a11y；`guardOverlay` 原实现已有成员判断，无需改；
+  `dropStackOverlay` 原本已还原 root alpha/背景。
+- 构建通过（离线）；真机 light/iOS 门禁、iOS 空白复现待设备空闲。
+
+- 追加：展开子视图不再走轻量 polish（`currentExpanded(contentView)==root` 直接返回），
+  避免展开态叠加第二枚大图标；展开布局完全原生。构建 sha256 前缀：`2680ac1b723a`（离线，未装机）。
+
+## 2026-11-02 · 主系统 OS5（A15）上的通知条美化适配
+
+- 环境澄清：Z8 主系统已是 OriginOS 5 / Android 15（sdk 35），此前门禁均在 OS3 DSU 上跑；
+  10-30 的离线修复这次首次装机验证。
+- light（原生优化）的原生差异：OS5 header 42dp、小图标 16dp、标题从 12dp 起排。
+  原实现把 38dp 图标叠在原生图标位置，观感只是"把左上角图标放大"。
+- OS5 light 新布局：
+  - 隐藏原生 header 小图标；彩色应用图标放左侧 16dp，标题/正文/应用名统一 66dp 列；
+  - 展开行、自动归组摘要/子行都走同一套（`ranker_group` 空正文摘要不再跳过）；
+  - 标题上提：header 42→34dp，找到真正带 topMargin 的文字容器减 8dp；
+    不能用 translation，否则标题顶进 header 被盖住、收起态缺字；
+  - 图标 42dp、圆角 11dp。
+- 展开/收起图标飞行：复用 iOS 的 morph（预建 flight、240ms spring），
+  light 只在 OS5 安装该守卫；日志实测 126px 图标 `y=71 → 119` 连续飞行，两侧 alpha=0。
+- 版本门槛：以上均走 `iosColumn`（SDK>=34），OS3 light 保持原样。
+- 证据：`work/z8os3-live/ui_final.xml`（header 底部=标题顶部：540/820/1370/1650/2185）；
+  morph 日志 `from=48,71x126 to=48,119x126`；装机 sha256 `650ff4cd4539…`
+  （style=light, verify=0）。
+- 备注：校验开关是 `betteroriginos_notify_verify`（不是 `..._row_verify`）。
