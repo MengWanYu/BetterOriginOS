@@ -1,0 +1,10 @@
+SELFTEST: 正例通过（7 条断言）
+SELFTEST: 反例「radius 档位算错」正确报红 -> radius: level=1 期望 54.0px 实得 36.0px
+SELFTEST: 反例「收纳栏间距没写」正确报红 -> shelf: gap 期望 21.0px 实得 0.0px
+SELFTEST: 反例「清除按钮尺寸错」正确报红 -> clear: 尺寸期望 138.0px 实得 100.0px
+SELFTEST: 反例「A11 亮度没锁住」正确报红 -> a11: 背景亮度应锁 25%，实得 93.9%（base=ffefeff0）
+SELFTEST: 反例「A11 高亮与底色相同」正确报红 -> a11: 高亮色与底色相同，IlluminationDrawable 的 ±0.15 没生效
+SELFTEST: 反例「A11 封面尺寸不是 52dp」正确报红 -> a11spec: art 期望 156.0 实得 180.0
+SELFTEST: 反例「背景没有 G2 裁剪」正确报红 -> bgclip: 半径为 0（r=0.0）
+SELFTEST: 反例「A11 进度条轨道不是 3dp」正确报红 -> a11spec: trackDp 期望 3 实得 10
+SELFTEST: 反例「A11 标题字号不对」正确报红 -> a11spec: titlePx 期望 48.0 实得 57.0

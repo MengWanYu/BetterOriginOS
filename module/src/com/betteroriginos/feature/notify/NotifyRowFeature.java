@@ -59,10 +59,22 @@ public final class NotifyRowFeature extends Feature {
     private static final String SCROLL_TEST_KEY = "betteroriginos_notify_scroll_test";
     private static final String TAG_ICON = "betteroriginos_notify_icon";
     private static final String TAG_LIGHT_BIG = "betteroriginos_notify_light_big";
+    /**
+     * header 时间的接管方式自报。push-only=只在事后推 translationX（col 布局钩子没装），
+     * column-hook=装了布局期对位；验证器用它决定"col measure"那套断言该不该跑。
+     * 只靠 install 那一行不够：SystemUI 启动那一秒 vivo 自己刷几百行，logd 的每进程
+     * 250/s 会把它整条冲掉（11-04 真机两次实测），所以补扫也按低频重发同一行。
+     */
+    private static final String HEADER_TIME_MODE =
+            "notify row feature installed header-time=push-only";
+    private static long sModeWitnessAt;
     private static final int LIGHT_TITLE_RAISE_DP = 8;
     private static final int LIGHT_ICON_DP = 42;
     private static final int LIGHT_ICON_CORNER_DP = 11;
     private static final WeakHashMap<View, View> LIGHT_NATIVE_ICON = new WeakHashMap<>();
+    /** 按住原生 header 小图标时被我们摘下来的那张 drawable（放开时要装回去） */
+    private static final WeakHashMap<View, android.graphics.drawable.Drawable>
+            LIGHT_ICON_DRAWABLE = new WeakHashMap<>();
     private static final WeakHashMap<View, int[]> LIGHT_ICON_LP = new WeakHashMap<>();
     private static final WeakHashMap<View, ViewTreeObserver> LIGHT_ICON_GUARD =
             new WeakHashMap<>();
@@ -135,6 +147,7 @@ public final class NotifyRowFeature extends Feature {
     private static final boolean STACK_BUILD_ENABLED = true;
     private static volatile boolean sVerifyEnabled;
     private static long sLastWitnessAt;
+    private static long sLastRoundnessDumpAt;
     /** 展开交接：overlay 当前淡入/淡出的目标值，与已打日志的状态 */
     private static final long OVERLAY_FADE_MS = 160;
     private static final WeakHashMap<View, Float> OVERLAY_FADE_TO = new WeakHashMap<>();
@@ -203,41 +216,17 @@ public final class NotifyRowFeature extends Feature {
     protected java.util.List<com.betteroriginos.core.FeatureOption> buildOptions() {
         java.util.List<com.betteroriginos.core.FeatureOption> options =
                 new java.util.ArrayList<>();
-        options.add(com.betteroriginos.core.FeatureOption.choice(
-                "style",
-                R.string.option_notify_style_title,
-                R.string.option_notify_style_summary,
-                "ios",
-                new String[]{"ios", "light"},
-                new int[]{R.string.notify_style_ios, R.string.notify_style_light},
-                null));
-        if (STACK_BUILD_ENABLED) {
+        // OS3 专属：把 OS5 的通知几何（连续角半径、收纳栏、浮动一键清除）移植过来
+        if (OsProfile.isA13OrLower()) {
             options.add(com.betteroriginos.core.FeatureOption.choice(
-                    "group_mode",
-                    R.string.option_group_mode_title,
-                    R.string.option_group_mode_summary,
-                    "ios_stack",
-                    new String[]{"ios_stack", "separate"},
-                    new int[]{R.string.group_mode_stack, R.string.group_mode_separate},
+                    "sep",
+                    R.string.option_sep_title,
+                    R.string.option_sep_summary,
+                    "off",
+                    new String[]{"off", "os5"},
+                    new int[]{R.string.sep_off, R.string.sep_os5},
                     null));
         }
-        options.add(com.betteroriginos.core.FeatureOption.choice(
-                "stack_metrics",
-                R.string.option_stack_metrics_title,
-                R.string.option_stack_metrics_summary,
-                "ios",
-                new String[]{"ios", "os5"},
-                new int[]{R.string.stack_metrics_ios, R.string.stack_metrics_os5},
-                null));
-        options.add(com.betteroriginos.core.FeatureOption.choice(
-                "list_overlap",
-                R.string.option_list_overlap_title,
-                R.string.option_list_overlap_summary,
-                "0",
-                new String[]{"0", "6", "10"},
-                new int[]{R.string.list_overlap_off, R.string.list_overlap_6,
-                        R.string.list_overlap_10},
-                null));
         return options;
     }
 
@@ -442,11 +431,162 @@ public final class NotifyRowFeature extends Feature {
             installVivoIconGuardHooks(cl);
             installWitnessHooks(cl);
             installShelfCornerHooks(cl);
+            if (OsProfile.isA13OrLower()) {
+                int mirrored = Os5Mirror.install(cl);
+                Log.i(TAG, "notify_row: os5 mirror hooks installed=" + mirrored);
+            }
             installEarlyInit(cl);
             initUngroupFlag(cl);
-            Log.i(TAG, "notify row feature installed");
+            // header 时间的接管方式，门禁据此决定 L10/L11（col measure 那套）该不该跑。
+            // 挂在"installed"这一行而不是单开一行：单开的那一行在真机上被 logd 限流整条丢过。
+            sModeWitnessAt = android.os.SystemClock.uptimeMillis();
+            Log.i(TAG, HEADER_TIME_MODE);
         } catch (Throwable t) {
             Log.e(TAG, "notify row feature install failed", t);
+        }
+    }
+
+    /** 逐帧快照的预算与上一帧状态（只在调试键开启时才有非空开销） */
+    private static int sTraceBudget;
+    private static int sTraceFrame;
+    private static long sTraceCheckAt;
+    private static final java.util.HashMap<String, String> sTracePrev = new java.util.HashMap<>();
+
+    /** 收集子树里所有某个类名的视图（一行可能有收起/展开两份，各带一颗 CachingIconView）。 */
+    private static void collectClass(View v, String simpleName,
+                                     java.util.List<View> out, int depth) {
+        if (v == null || depth > 8 || out.size() > 4) {
+            return;
+        }
+        if (v.getClass().getSimpleName().equals(simpleName)) {
+            out.add(v);
+        }
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                collectClass(g.getChildAt(i), simpleName, out, depth + 1);
+            }
+        }
+    }
+
+    /** 从某个视图往下找我们那枚带标记的大图标（找不到返回 null，不抛）。 */
+    private static View findTag(View v) {
+        return v instanceof ViewGroup ? ((ViewGroup) v).findViewWithTag(TAG_LIGHT_BIG) : null;
+    }
+
+    /** 每行一帧的只读快照：大图标在不在/alpha、原生小图标可见性与 alpha、行高、当前显示哪一份根。 */
+    private static void traceFrame(ViewGroup list) {
+        Context ctx = list.getContext();
+        long now = android.os.SystemClock.uptimeMillis();
+        if (sTraceBudget <= 0) {
+            // 预算耗尽后每秒才看一次开关，别每帧读 settings
+            if (now - sTraceCheckAt < 1000) {
+                return;
+            }
+            sTraceCheckAt = now;
+            if (traceRequested(ctx)) {
+                sTraceBudget = 240;          // ≈4 秒 @60fps
+                sTraceFrame = 0;
+                sTracePrev.clear();
+                Log.i(TAG, "notify_row.trace arm frames=" + sTraceBudget);
+            } else {
+                return;
+            }
+        }
+        sTraceBudget--;
+        sTraceFrame++;
+        StringBuilder sum = new StringBuilder();
+        for (int i = 0; i < list.getChildCount(); i++) {
+            View child = list.getChildAt(i);
+            if (child == null || !child.getClass().getSimpleName()
+                    .contains("ExpandableNotificationRow")) {
+                continue;
+            }
+            String id = Integer.toHexString(System.identityHashCode(child));
+            try {
+                // 对照三种查找入口，看到底哪一层能找到我们那枚大图标：
+                // ①行本身 ②行自己的 contentView 的可见根 ③那份收起态根。
+                // polish 用的是 ②/③，所以 ① 找不到不代表图标不在屏上 —— 先把这点弄清楚再谈闪现
+                View cv = contentViewIn(child);
+                View shownRoot = cv == null ? null : visibleRootOf(cv);
+                View conRoot = cv == null ? null : currentContracted(cv);
+                View big = findTag(child);
+                String where = "row";
+                if (big == null) {
+                    big = shownRoot == null ? null : shownRoot.findViewWithTag(TAG_LIGHT_BIG);
+                    where = "shown";
+                }
+                if (big == null) {
+                    big = conRoot == null ? null : conRoot.findViewWithTag(TAG_LIGHT_BIG);
+                    where = "contracted";
+                }
+                if (big == null) {
+                    where = "none";
+                }
+                View nat = big == null ? null : LIGHT_NATIVE_ICON.get(
+                        "row".equals(where) ? child : ("shown".equals(where) ? shownRoot : conRoot));
+                if (nat == null && big != null && !sTracePrev.isEmpty()) {
+                    nat = findClass(child, "CachingIconView");
+                }
+                // 一行里可能同时存在**两颗** CachingIconView（收起/展开两份根各一颗）。
+                // 到底是哪颗在被画，决定我们该按哪颗 —— 所以两份状态都记下来。
+                java.util.ArrayList<View> all = new java.util.ArrayList<>(2);
+                collectClass(child, "CachingIconView", all, 0);
+                StringBuilder icons = new StringBuilder();
+                for (int k = 0; k < all.size() && k < 3; k++) {
+                    View v = all.get(k);
+                    icons.append(k == 0 ? "" : ",")
+                            .append(Integer.toHexString(System.identityHashCode(v)))
+                            .append(':').append(v.getVisibility())
+                            .append(':').append(String.format(
+                                    java.util.Locale.US, "%.2f", v.getAlpha()))
+                            .append(":s").append(String.format(
+                                    java.util.Locale.US, "%.2f", v.getScaleX()))
+                            // d=有没有 drawable：没有东西可画时，vivo 再怎么抬 alpha 也闪不出来
+                            .append(":d").append(v instanceof ImageView
+                                    && ((ImageView) v).getDrawable() != null ? "1" : "0")
+                            // da = drawable 自己的 alpha：0 就是"有图但画不出来"，
+                            // 这一项为 0 时 vivo 抬视图属性也不会闪
+                            .append(":da").append(v instanceof ImageView
+                                    && ((ImageView) v).getDrawable() != null
+                                    ? String.valueOf(((ImageView) v).getDrawable().getAlpha())
+                                    : "-")
+                            .append(v == nat ? "*" : "");
+                }
+                String state = (big == null ? "-" : (where + ":A" + String.format(
+                        java.util.Locale.US, "%.2f", big.getAlpha())))
+                        + "/" + (nat == null ? "-" : (nat.getVisibility()
+                        + ":" + String.format(java.util.Locale.US, "%.2f", nat.getAlpha())))
+                        + "/icons=" + icons
+                        + "/h" + child.getHeight()
+                        + "/v" + child.getVisibility()
+                        + "/ty" + (int) child.getTranslationY();
+                if (state.equals(sTracePrev.get(id))) {
+                    continue;      // 与上一帧一致 ⇒ 不打，否则 240 帧会把别的见证挤出缓冲区
+                }
+                sTracePrev.put(id, state);
+                // 逐帧路径里**不做反射取包名**（那是热路径）；id 与包名的对账用 1Hz 那批 witness
+                sum.append("\n  f=").append(sTraceFrame).append(" id=").append(id)
+                        .append(" big/nat=").append(state);
+            } catch (Throwable ignored) {
+            }
+        }
+        if (sum.length() > 0) {
+            Log.i(TAG, "notify_row.trace" + sum);
+        }
+        if (sTraceBudget == 0) {
+            Log.i(TAG, "notify_row.trace done frames=" + sTraceFrame
+                    + " rows=" + sTracePrev.size());
+            sTracePrev.clear();
+        }
+    }
+
+    private static boolean traceRequested(Context ctx) {
+        try {
+            return android.provider.Settings.Global.getInt(
+                    ctx.getContentResolver(), "betteroriginos_trace_flicker", 0) == 1;
+        } catch (Throwable t) {
+            return false;
         }
     }
 
@@ -462,42 +602,195 @@ public final class NotifyRowFeature extends Feature {
             XposedBridge.hookAllMethods(nsnl, "dispatchDraw", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
-                    if (!sVerifyEnabled) {
-                        return;
-                    }
-                    long now = android.os.SystemClock.uptimeMillis();
-                    if (now - sLastWitnessAt < 1000) {
-                        return;
-                    }
-                    sLastWitnessAt = now;
-                    ViewGroup list = (ViewGroup) param.thisObject;
-                    StringBuilder tree = new StringBuilder();
-                    for (int i = 0; i < list.getChildCount(); i++) {
-                        View child = list.getChildAt(i);
-                        tree.append(' ').append(i).append(':')
-                                .append(child.getClass().getName())
-                                .append("(t").append(child.getTop())
-                                .append(",h").append(child.getHeight())
-                                .append(",ty").append((int) child.getTranslationY())
-                                .append(",sy").append(String.format(
-                                        java.util.Locale.US, "%.2f", child.getScaleY()))
-                                .append(",a").append(String.format(
-                                        java.util.Locale.US, "%.2f", child.getAlpha()))
-                                .append(",v").append(child.getVisibility()).append(')');
-                        if (child.getClass().getSimpleName()
-                                .contains("ExpandableNotificationRow")) {
-                            logWitness(child);
+                    try {
+                        if (!(param.thisObject instanceof ViewGroup)) {
+                            return;
                         }
+                        // 亚秒级的"闪"用 1Hz 的度量采样是量不到的（本轮就是这么把假设
+                        // 一条条证伪后卡住的）。这个调试键开启一次**逐帧**只读快照：
+                        // 只在状态相对上一帧变了的那一行打一条，预算用完自动停。
+                        traceFrame((ViewGroup) param.thisObject);
+                        long now = android.os.SystemClock.uptimeMillis();
+                        if (now - sLastWitnessAt < 1000) {
+                            return;
+                        }
+                        sLastWitnessAt = now;
+                        ViewGroup list = (ViewGroup) param.thisObject;
+                        healLightRows(list);
+                        if (!sVerifyEnabled) {
+                            return;
+                        }
+                        // 圆角快照：只靠切 sep 触发的话，验收脚本在稳态面板里取不到读数
+                        if (now - sLastRoundnessDumpAt > 15000) {
+                            sLastRoundnessDumpAt = now;
+                            dumpRoundness(list, "live");
+                        }
+                        StringBuilder tree = new StringBuilder();
+                        for (int i = 0; i < list.getChildCount(); i++) {
+                            View child = list.getChildAt(i);
+                            tree.append(' ').append(i).append(':')
+                                    .append(child.getClass().getName())
+                                    .append("(t").append(child.getTop())
+                                    .append(",h").append(child.getHeight())
+                                    .append(",ty").append((int) child.getTranslationY())
+                                    .append(",sy").append(String.format(
+                                            java.util.Locale.US, "%.2f", child.getScaleY()))
+                                    .append(",a").append(String.format(
+                                            java.util.Locale.US, "%.2f", child.getAlpha()))
+                                    .append(",v").append(child.getVisibility()).append(')');
+                            if (child.getClass().getSimpleName()
+                                    .contains("ExpandableNotificationRow")) {
+                                logWitness(child);
+                            }
+                        }
+                        Log.i(TAG, "notify_row.witness.list n=" + list.getChildCount()
+                                + " h=" + list.getHeight() + " scroll=" + list.getScrollY()
+                                + " sy=" + String.format(java.util.Locale.US, "%.2f",
+                                        list.getScaleY())
+                                + " kids=" + tree);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "notify_row: witness/heal failed", t);
                     }
-                    Log.i(TAG, "notify_row.witness.list n=" + list.getChildCount()
-                            + " h=" + list.getHeight() + " scroll=" + list.getScrollY()
-                            + " sy=" + String.format(java.util.Locale.US, "%.2f",
-                                    list.getScaleY())
-                            + " kids=" + tree);
                 }
             });
         } catch (Throwable t) {
             Log.w(TAG, "notify_row: witness hook failed", t);
+        }
+    }
+
+    /**
+     * 自愈补扫：A13 的部分行（vivo 分组摘要、系统服务行）不走
+     * NotificationContentView.setContractedChild/setExpandedChild，restyle 从未被调用，
+     * 于是一直没有 42dp 大图标。列表每帧只做一次（1s 节流），未处理的行 post 出去补一次；
+     * 已处理的行由 RESTYLED_ROWS 记住，不会重复。
+     */
+    private static void healLightRows(ViewGroup list) {
+        try {
+            // 接管方式按低频重发（补扫本身 1s 一趟）：门禁拿不到这一行就只能判红，
+            // 而它只在进程启动那一拍打一次时会被 logd 的每进程限流整条冲掉。
+            long now = android.os.SystemClock.uptimeMillis();
+            if (now - sModeWitnessAt > 5000) {
+                sModeWitnessAt = now;
+                Log.i(TAG, HEADER_TIME_MODE);
+            }
+            for (int i = 0; i < list.getChildCount(); i++) {
+                View child = list.getChildAt(i);
+                if (child == null || !child.getClass().getSimpleName()
+                        .contains("ExpandableNotificationRow")) {
+                    continue;
+                }
+                healLightRow(child);
+                // 组子行要单独遍历：它们既可能漏绑，也不走圆角钩子
+                maintainNestedRows(child, 0);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /**
+     * 组子行既不走 contentView 绑定（父行展开时系统不重新调 setContractedChild），
+     * 圆角也由父行 applyChildrenRoundness 直接下发（不经过 getRoundnessFraction），
+     * 所以补扫必须自己遍历到它们：漏绑的补一次 polish，文本列做一次收敛。
+     */
+    private static void maintainNestedRows(View v, int depth) {
+        if (depth > 3 || !(v instanceof ViewGroup)) {
+            return;
+        }
+        ViewGroup g = (ViewGroup) v;
+        for (int i = 0; i < g.getChildCount(); i++) {
+            View c = g.getChildAt(i);
+            if (c == null) {
+                continue;
+            }
+            if (c != v && c.getClass().getName().endsWith(".ExpandableNotificationRow")
+                    && !bool(c, "isSummaryWithChildren")) {
+                healLightRow(c);
+                maybeConvergeHeader(c);
+            }
+            maintainNestedRows(c, depth + 1);
+        }
+    }
+
+    private static final WeakHashMap<View, Integer> HEAL_TRIES = new WeakHashMap<>();
+
+    private static void healLightRow(final View row) {
+        try {
+            if (!row.isShown() || bool(row, "isRemoved")) {
+                return;
+            }
+            Context ctx = row.getContext();
+            if (!isEnabledStatic(ctx) || !isLightStyle(ctx)) {
+                return;
+            }
+            final View cv = contentViewIn(row);
+            if (bool(row, "isSummaryWithChildren")) {
+                // 分组摘要保持原生小图标：42dp 塞进 44dp 的 header 会变成"大头"，
+                // 用户明确否决。要放大图标的是展开后的子行（走下面的常规 polish）。
+                return;
+            }
+            if (cv == null) {
+                lightSkip("heal-nocv", row, null);
+                return;
+            }
+            // 只认 light 自己的完成标记：RESTYLED 是 iOS 卡那套布局钩子的开关，
+            // 在 light 路径里永远不会被写，所以"补扫每秒重跑 polish"就是这么来的。
+            if (LIGHT_POLISHED.containsKey(cv) || RESTYLED.containsKey(cv)) {
+                // 标记说的是"这一行已经按大图标排好"。vivo 收起再展开子行时会换一份可见子树
+                // （或把图标连同旧根一起摘掉），标记留在 cv 上就成了谎话，而补扫只认标记 ——
+                // 现象正是用户报的"展开时大图标离奇消失并且再也回不来"（真机见证
+                // notify_row.heal skip reason=marked-empty h=255 vis=0，稳定 8s 后仍未恢复）。
+                View shown = visibleRootOf(cv);
+                if (shown != null && shown.findViewWithTag(TAG_LIGHT_BIG) != null) {
+                    // 标记与屏幕上那一份一致：大图标在。但 A13 一行有**收起/展开两份根**，
+                    // 而 LIGHT_POLISHED 的键是 contentView —— 只要其中一份排好就算"这行做完了"，
+                    // 另一份的原生小图标从来没被按住。展开动画把可见的那一份换过去时，
+                    // 用户看到的就是"某条通知的小图标闪一下"（切歌引发整列表重排时尤其明显）。
+                    // 所以两份都查、都按：幂等写，已经是 0 的那份一个字节都不动。
+                    pressStrayNativeIcon(shown, "shown");
+                    View other = (shown == currentContracted(cv))
+                            ? currentExpanded(cv) : currentContracted(cv);
+                    if (other != null) {
+                        pressStrayNativeIcon(other, "twin");
+                    }
+                    return;
+                }
+                witnessMarkedButEmpty(row, cv, shown);
+                if (!rearmStalePolish(cv, shown)) {
+                    return;      // 这个根已经给过一次重排机会；还没有图标就是"这行不该有图标"，
+                                 // 继续清标记就变成每秒重跑的打环
+                }
+            }
+            synchronized (HEAL_TRIES) {
+                Integer n = HEAL_TRIES.get(row);
+                int tries = n == null ? 0 : n.intValue();
+                if (tries >= 6) {
+                    // 上限放宽到 6：子行可能在"还没长高"时先来几轮，不能被 3 次用完就永久放弃
+                    lightSkip("heal-tried", row, "tries=" + tries);
+                    return;
+                }
+                HEAL_TRIES.put(row, tries + 1);
+                // 每行只记一次：补扫本身每秒都跑，逐次打会把别的见证挤出缓冲区
+                if (isVerify(ctx) && tries == 0) {
+                    Log.i(TAG, "notify_row.heal try=" + (tries + 1)
+                            + " pkg=" + (sbnOf(row) == null ? "-" : sbnOf(row).getPackageName())
+                            + " child=" + (bool(row, "isChildInGroup") ? 1 : 0)
+                            + " vis=" + row.getVisibility());
+                }
+            }
+            View root = visibleRootOf(cv);
+            if (root == null) {
+                return;
+            }
+            final View target = root;
+            row.post(safe(() -> {
+                try {
+                    if (!LIGHT_POLISHED.containsKey(cv) && !RESTYLED.containsKey(cv)) {
+                        restyle(cv, target);
+                    }
+                } catch (Throwable ignored) {
+                }
+            }));
+        } catch (Throwable ignored) {
         }
     }
 
@@ -926,6 +1219,81 @@ public final class NotifyRowFeature extends Feature {
             for (String method : new String[]{"setUserExpanded", "setChildrenExpanded"}) {
                 XposedBridge.hookAllMethods(row, method, rejectExpand);
             }
+            // 组收起时淡出子行的大图标。必须挂在这个入口——它是"系统动手之前"，那一刻图标还挂在
+            // 树上。前两版押在子行自己的布局回调/preDraw 与摘要行布局上，真机收起时全是 0 条触发：
+            // 子行连同图标被提前拆掉，摘要行则根本不重新布局，所以消失一定是硬切。
+            XC_MethodHook collapseFade = new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    if (param.args == null || param.args.length < 1
+                            || !(param.thisObject instanceof ViewGroup)) {
+                        return;
+                    }
+                    View self = (View) param.thisObject;
+                    boolean open = Boolean.TRUE.equals(param.args[0]);
+                    // 只有"确实带子项的摘要行"才处理：系统对每个无子项的行也会调这个方法，
+                    // 不加这道判断就会把子行自己的图标淡掉，再被补扫 polish 回来，形成打环。
+                    if (!bool(self, "isSummaryWithChildren") || childCountOf(self) <= 0) {
+                        return;
+                    }
+                    if (open) {
+                        // 展开：这一路是组开合唯一确定会执行的入口，时间对位也挂在这里。
+                        // vivo 会在动画过程中重新布局 header 把我们写的位移抹掉，所以按它的节奏
+                        // 再补推三次（150/400/800ms），而不是只推一次然后指望收敛循环。
+                        pushTimesIn((ViewGroup) self, 0, "group-open");
+                        for (int i = 1; i <= 3; i++) {
+                            final ViewGroup g = (ViewGroup) self;
+                            final int step = i;
+                            self.postDelayed(safe(() -> pushTimesIn(g, 0, "group-open+" + (step * 250))),
+                                    step * 250L);
+                        }
+                        return;
+                    }
+                    java.util.List<View> icons = new java.util.ArrayList<>(4);
+                    collectLightIcons((ViewGroup) param.thisObject, icons, 0);
+                    if (sVerifyEnabled && sCollapseWitnesses < 8) {
+                        sCollapseWitnesses++;
+                        // icons=0 也要打：那说明子行此刻已被移走，得换更早的入口
+                        Log.i(TAG, "notify_row.light.collapse via=setChildrenExpanded row="
+                                + Integer.toHexString(System.identityHashCode(param.thisObject))
+                                + " icons=" + icons.size());
+                    }
+                    for (View icon : icons) {
+                        View host = icon.getParent() instanceof View
+                                ? (View) icon.getParent() : null;
+                        fadeLightIcon(host, icon, 0f, "children-collapse");
+                    }
+                }
+            };
+            Log.i(TAG, "notify_row: children-collapse hook hits="
+                    + XposedBridge.hookAllMethods(row, "setChildrenExpanded", collapseFade).size());
+            // 组里再展开**单条**通知时，vivo 会把这行的 header 换成另一份布局（文字行变 wrap 宽），
+            // 我们按"行右端"算的位移就没了 —— 用户看到时间从右边跑回左边、压住图标。
+            // 这里在展开动作之后按 0/150/300/600ms 重推（布局是异步的，一次不够）。
+            XC_MethodHook rowExpandTime = new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    if (param.args == null || param.args.length < 1
+                            || !Boolean.TRUE.equals(param.args[0])
+                            || !(param.thisObject instanceof ViewGroup)) {
+                        return;
+                    }
+                    final ViewGroup self = (ViewGroup) param.thisObject;
+                    // 先手：赶在系统这次布局/动画之前把两份 header 的时间都摆好，
+                    // 否则会先露一帧"左对齐"再被补推闪回右边（用户报的正是这一下）。
+                    pushTimesIn(self, 0, "row-expand");
+                    for (int i = 1; i <= 4; i++) {
+                        final int step = i;
+                        self.postDelayed(safe(() -> pushTimesIn(self, 0, "row-expand+" + (step * 150))),
+                                step * 150L);
+                    }
+                }
+            };
+            int reHits = 0;
+            for (String m : new String[]{"setUserExpanded", "setExpanded"}) {
+                reHits += XposedBridge.hookAllMethods(row, m, rowExpandTime).size();
+            }
+            Log.i(TAG, "notify_row: row-expand time hook hits=" + reHits);
             /**
              * 折叠的堆叠行必须自己定高：StackScrollAlgorithm 用 measureChildExactly 按它缓存的
              * 每行高度反向钉住行高（行内大件全 GONE 也仍是展开时的高度），
@@ -1137,6 +1505,9 @@ public final class NotifyRowFeature extends Feature {
                     XposedHelpers.setObjectField(bg, "mDontModifyCorners", Boolean.FALSE);
                 }
                 XposedHelpers.callMethod(bg, "setRadius", bottom, bottom);
+                // setRadius 只改字段，不保证宿主重绘：通知行静止时会出现"值对了但画面没跟上"。
+                // 与 forceShelfDrawableCorners 里对 drawable 的 invalidateSelf 配合，两边都推一次。
+                bg.invalidate();
                 if (dontModify) {
                     XposedHelpers.setObjectField(bg, "mDontModifyCorners", Boolean.TRUE);
                 }
@@ -1191,9 +1562,15 @@ public final class NotifyRowFeature extends Feature {
                 ((GradientDrawable) layer).setCornerRadii(new float[]{
                         radius, radius, radius, radius,
                         radius, radius, radius, radius});
+                // GradientDrawable 的 setter 不会自己失效，宿主也不一定再画一次；
+                // 不 invalidate 就是"改了但看不到"（与下面统一收尾）
+                layer.invalidateSelf();
                 if (sVerifyEnabled && SHELF_DRAWABLE_LOGGED.put(layer, Boolean.TRUE) == null) {
                     Log.i(TAG, "notify_row: shelf gd corners rounded r=" + radius);
                 }
+            } else if (sVerifyEnabled && SHELF_DRAWABLE_LOGGED.put(layer, Boolean.TRUE) == null) {
+                // 落到这里的 drawable 我们**没动**：没有这条日志，机型换个背景 drawable 就会静默失效
+                Log.i(TAG, "notify_row: shelf drawable unhandled cls=" + cls + " r=" + radius);
             }
         } catch (Throwable t) {
             if (sVerifyEnabled) {
@@ -1302,6 +1679,7 @@ public final class NotifyRowFeature extends Feature {
         sVerifyEnabled = verify;
         IosNotificationRow.traceFrames = verify;
         registerReverify(ctx);
+        registerSepObserver(ctx);
         if (light) {
             Log.i(TAG, "notify_row: light style, native list metrics/spacing");
         }
@@ -1335,6 +1713,13 @@ public final class NotifyRowFeature extends Feature {
 
     /** iOS 堆叠参数：16dp 侧边距 / 8dp 间距 / 20dp 圆角（可在功能选项回 OS5） */
     private static int sMetricsApplied;
+
+    /** OS3 light 的 OS5 复刻：off / os5（列表间距由 Os5Mirror 决定，关闭时还原原生值） */
+    private static final WeakHashMap<View, Boolean> LIGHT_STACKS = new WeakHashMap<>();
+    private static final WeakHashMap<View, Integer> LIGHT_ORIG_GAP = new WeakHashMap<>();
+    private static final WeakHashMap<Object, Float> LIGHT_ORIG_ALGO_GAP = new WeakHashMap<>();
+    private static volatile String sSepMode;
+    private static boolean sSepObserver;
 
     /** 字段存在才写：A13/A15 的堆叠容器字段名不同，缺字段是正常情况而不是错误 */
     private static void setIntIfPresent(Object target, String field, int value) {
@@ -1402,6 +1787,539 @@ public final class NotifyRowFeature extends Feature {
         }
     }
 
+
+    private static String sepMode(Context ctx) {
+        try {
+            return "os5".equals(Prefs.option(ctx, "notify_row", "sep", "off"))
+                    ? "os5" : "off";
+        } catch (Throwable ignored) {
+            return "off";
+        }
+    }
+
+    /** OS3 的 OS5 复刻：列表间距写 A15 的 7dp，几何（连续角/收纳栏/浮动清除）由 Os5Mirror 负责。 */
+    private static void applyLightSeparation(View stack, Context ctx) {
+        try {
+            if (!OsProfile.isA13OrLower()) {
+                return;
+            }
+            String mode = sepMode(ctx);
+            sSepMode = mode;
+            LIGHT_STACKS.put(stack, Boolean.TRUE);
+            boolean split = "os5".equals(mode) && isLightStyle(ctx);
+            Os5Mirror.setEnabled(split);
+            if (isDebug(ctx)) {
+                Log.i(TAG, "notify_row: os5 mirror enter mode=" + mode + " on=" + split);
+            }
+
+            int orig;
+            Integer stored = LIGHT_ORIG_GAP.get(stack);
+            if (stored == null) {
+                try {
+                    orig = XposedHelpers.getIntField(stack, "mPaddingBetweenElements");
+                } catch (Throwable t) {
+                    orig = 0;
+                }
+                LIGHT_ORIG_GAP.put(stack, orig);
+            } else {
+                orig = stored;
+            }
+            int gap = split ? NotifyRowSpec.dp(ctx, Os5Mirror.GAP_BETWEEN_DP) : orig;
+            try {
+                XposedHelpers.setIntField(stack, "mPaddingBetweenElements", gap);
+            } catch (Throwable ignored) {
+            }
+            Object algo = null;
+            try {
+                algo = XposedHelpers.getObjectField(stack, "mStackScrollAlgorithm");
+            } catch (Throwable ignored) {
+            }
+            if (algo != null) {
+                Float origF = LIGHT_ORIG_ALGO_GAP.get(algo);
+                if (origF == null) {
+                    float f = 0f;
+                    try {
+                        f = XposedHelpers.getFloatField(algo, "mPaddingBetweenElements");
+                    } catch (Throwable ignored) {
+                    }
+                    LIGHT_ORIG_ALGO_GAP.put(algo, f);
+                    origF = f;
+                }
+                try {
+                    XposedHelpers.setFloatField(algo, "mPaddingBetweenElements",
+                            split ? (float) NotifyRowSpec.dp(ctx, Os5Mirror.GAP_BETWEEN_DP) : origF);
+                } catch (Throwable ignored) {
+                }
+            }
+
+            if (isDebug(ctx)) {
+                Log.i(TAG, "notify_row: os5 mirror mode=" + mode + " gap=" + gap);
+            }
+            stack.requestLayout();
+            stack.invalidate();
+            refreshCardRoundness();
+            if (isVerify(ctx)) {
+                final View probe = stack;
+                probe.postDelayed(safe(() -> dumpRoundness(probe, "sep")), 1500);
+            }
+        } catch (Throwable t) {
+            try {
+                if (isDebug(stack.getContext())) {
+                    Log.w(TAG, "notify_row: split failed", t);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /**
+     * 把 header 的应用名/时间实际左缘收敛到 66dp 列：header 里还有图标槽，
+     * 单次 padding 增量常被系统布局吃掉或过冲，所以量一次改一次，最多 5 轮。
+     * 独立行、组摘要、组子行共用这套口径（alignLightColumn 的公式只作初值）。
+     */
+    private static final WeakHashMap<View, long[]> HEADER_TEXT_STATE = new WeakHashMap<>();
+    private static final WeakHashMap<View, Boolean> HEADER_CONVERGING = new WeakHashMap<>();
+    private static final WeakHashMap<View, Long> HEADER_LAST_TRY = new WeakHashMap<>();
+    private static final java.util.Set<String> sColLogOnce =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+    /** 常态收敛入口：由圆角钩子（每轮布局都会调）触发，同一 header 只允许一条链在跑。 */
+    private static void maybeConvergeHeader(final View row) {
+        try {
+            if (row == null || !row.isShown()) {
+                return;
+            }
+            View hdr = findViewByIdSuffixShown(row, "notification_header");
+            if (hdr == null || hdr.getHeight() <= 0) {
+                lightSkip("col-nohdr", row, "hdr=" + (hdr == null ? "null" : "h0"));
+                return;
+            }
+            long now = android.os.SystemClock.uptimeMillis();
+            synchronized (HEADER_CONVERGING) {
+                Long last = HEADER_LAST_TRY.get(hdr);
+                if (last != null && now - last < 400) {
+                    return;
+                }
+                HEADER_LAST_TRY.put(hdr, now);
+            }
+            synchronized (HEADER_CONVERGING) {
+                if (Boolean.TRUE.equals(HEADER_CONVERGING.get(hdr))) {
+                    return;
+                }
+                HEADER_CONVERGING.put(hdr, Boolean.TRUE);
+            }
+            convergeHeaderColumn(row, hdr, 0);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /**
+     * 把 header 的时间推到文字行右端（OS5 口径：时间在右上角，右边缘停在应用名那条线的末尾、
+     * 箭头左侧）。门槛是"这一行已按展开态布局"（≥70dp）：紧凑子行是原生小行，不动。
+     *
+     * 全程用**布局坐标**（parent.getWidth() 与 child.getRight()），不碰 getLocationOnScreen：
+     * 上一版用屏幕坐标，展开动画期间祖先本身带 translationY/X，那份位移被当成时间自己的位移算进
+     * 增量，于是"先跳到右边、动画一结束再推出去被卡片裁掉"（用户看到的就是一秒多后消失）。
+     */
+    /** 把一枚 time 推到它所在 header 的右内缩处（有箭头则停在箭头左缘）——布局坐标，纯几何。 */
+    private static void pushTimeRight(View time, String why) {
+        try {
+            if (time == null || time.getWidth() <= 0) {
+                return;
+            }
+            View header = time;
+            for (int i = 0; i < 6 && header != null; i++) {
+                if (header.getId() != 0 && idSuffix(header).equals("notification_header")) {
+                    break;
+                }
+                header = header.getParent() instanceof View ? (View) header.getParent() : null;
+            }
+            if (header == null || header.getWidth() <= 0) {
+                return;
+            }
+            // 时间在 header 坐标系里的布局位置（逐级累加 getLeft，不含 translationX）
+            int offX = 0;
+            View cur = time;
+            for (int i = 0; i < 6 && cur != null && cur != header; i++) {
+                offX += cur.getLeft();
+                cur = cur.getParent() instanceof View ? (View) cur.getParent() : null;
+            }
+            if (cur != header) {
+                return;
+            }
+            // 右边界：优先"文字行的右端"（OS5 就是停在箭头左侧）；行在展开态会变成 wrap 宽度，
+            // 那时它等于时间自身的右缘，用它当目标就等于不推 —— 这正是"再展开单条、时间又回左边"。
+            View line = findViewByIdSuffixShown(header, "notification_top_line");
+            int lineRight = -1;
+            if (line != null && line.getWidth() > 0) {
+                int lineOff = 0;
+                View c2 = line;
+                for (int i = 0; i < 6 && c2 != null && c2 != header; i++) {
+                    lineOff += c2.getLeft();
+                    c2 = c2.getParent() instanceof View ? (View) c2.getParent() : null;
+                }
+                if (c2 == header) {
+                    lineRight = lineOff + line.getWidth();
+                }
+            }
+            int target = lineRight;
+            if (target <= 0 || target - offX - time.getWidth() < 8) {
+                // 行没给出有效右边界（wrap）：退到箭头左缘，没有箭头就用 header 右内缩 16dp
+                View chevron = findViewByIdSuffixShown(header, "header_button_container");
+                if (chevron != null && chevron.getWidth() > 0) {
+                    int off = 0;
+                    View c3 = chevron;
+                    for (int i = 0; i < 6 && c3 != null && c3 != header; i++) {
+                        off += c3.getLeft();
+                        c3 = c3.getParent() instanceof View ? (View) c3.getParent() : null;
+                    }
+                    target = c3 == header ? off : -1;
+                }
+                if (target <= 0) {
+                    target = header.getWidth() - NotifyRowSpec.dp(time.getContext(), 16);
+                }
+            }
+            int d = target - (offX + time.getRight());
+            if (Math.abs(d) <= 2) {
+                return;
+            }
+            // 直接写绝对位移：time 是一枚纯文本，没有系统自己的位移要保留。
+            // 位移会让它离开"文字行"的边界（展开态的行会缩成 wrap 宽度），必须把沿途容器的
+            // 裁剪关掉，否则它在右边根本画不出来：真机表现就是"右边看不到、dump 里连节点都没有，
+            // 等系统重排又回到左边压住图标"。只关到 header 这一层，不动行外的东西。
+            View clipStop = time;
+            for (int i = 0; i < 5 && clipStop != null && clipStop != header; i++) {
+                View p = clipStop.getParent() instanceof View ? (View) clipStop.getParent() : null;
+                if (p instanceof ViewGroup) {
+                    ((ViewGroup) p).setClipChildren(false);
+                }
+                clipStop = p;
+            }
+            time.setTranslationX(d);
+            hookTimeRelayout(header, time);
+            timeWitness("push", "d=" + d + " target=" + target + " why=" + why, header);
+        } catch (Throwable t) {
+            timeWitness("throw", String.valueOf(t), time);
+        }
+    }
+
+    /**
+     * vivo 会在每次重新布局 header 时把 time 的 translationX 写回 0（真机："推了但还是留在左边"），
+     * 只靠几次延时补推落不住。挂在它所在那一行的布局回调上：行一重排就再推一次。
+     */
+    private static final WeakHashMap<View, View> TIME_RELAYOUT = new WeakHashMap<>();
+
+    private static void hookTimeRelayout(final View line, final View time) {
+        synchronized (TIME_RELAYOUT) {
+            if (TIME_RELAYOUT.get(line) == time) {
+                return;
+            }
+            TIME_RELAYOUT.put(line, time);
+        }
+        line.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+            @Override
+            public void onLayoutChange(View v, int left, int top, int right, int bottom,
+                                       int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                pushTimeRight(time, "relayout");
+            }
+        });
+    }
+
+    /** 一棵子树里所有 header 的时间（组开合时一次性重推，vivo 会把布局重置回去）。 */
+    private static void pushTimesIn(ViewGroup g, int depth, String why) {
+        if (g == null || depth > 8) {
+            return;
+        }
+        for (int i = 0; i < g.getChildCount(); i++) {
+            View c = g.getChildAt(i);
+            if (c == null) {
+                continue;
+            }
+            if (c.getId() != 0 && idSuffix(c).equals("time")) {
+                // 不再按"行高≥70dp"过滤：展开过渡里先露出来的是紧凑那份 header，它的时间也在
+                // 左边；只推最终那份就会出现"先回左边、动画末尾再被闪回右边"（用户报的现象）。
+                // 两份都推，谁先可见谁就已经在右边。
+                pushTimeRight(c, why);
+            } else if (c instanceof ViewGroup) {
+                pushTimesIn((ViewGroup) c, depth + 1, why);
+            }
+        }
+    }
+
+    private static void alignHeaderTime(final View row, final View header) {
+        try {
+            View time = findViewByIdSuffixShown(header, "time");
+            if (time == null) {
+                return;
+            }
+            if (row.getHeight() < NotifyRowSpec.dp(row.getContext(), 70)) {
+                return;   // 紧凑子行：那本来就是原生小行，不动原生排版
+            }
+            pushTimeRight(time, "converge");
+        } catch (Throwable t) {
+            timeWitness("throw", String.valueOf(t), header);
+        }
+    }
+
+    private static String idSuffix(View v) {
+        Object id = null;
+        try {
+            id = v.getResources() == null ? null : v.getResources().getResourceName(v.getId());
+        } catch (Throwable ignored) {
+        }
+        String s = id == null ? v.getClass().getSimpleName() : id.toString();
+        int i = s.lastIndexOf('/');
+        return i >= 0 ? s.substring(i + 1) : s;
+    }
+
+    /**
+     * 时间对位的见证：按 (阶段 + header) 去重，整轮封顶 8 条。
+     * 上一轮"用户说时间跳了却一条 notify_row.time 都没有"，分不清是没跑到还是跑到没日志，
+     * 所以早退分支也要各留一条。
+     */
+    private static final java.util.Set<String> sTimeWitness =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+    private static int sTimeWitnessLines;
+
+    private static void timeWitness(String tag, String body, View header) {
+        // 不看 sVerifyEnabled：上一轮"用户说时间没动，而日志一条都没有"，
+        // 开关本身就成了嫌疑——它一旦为 false，诊断和修复就同时失明。封顶 12 条不会刷屏。
+        if (sTimeWitnessLines >= 12) {
+            return;
+        }
+        if (!sTimeWitness.add(tag + "|" + System.identityHashCode(header))) {
+            return;
+        }
+        sTimeWitnessLines++;
+        Log.i(TAG, "notify_row.time " + tag + " " + body + " hdr="
+                + Integer.toHexString(System.identityHashCode(header)));
+    }
+
+    private static void convergeHeaderColumn(final View row, final View header, final int pass) {
+        if (pass >= 5 || header == null || row == null) {
+            synchronized (HEADER_CONVERGING) {
+                HEADER_CONVERGING.remove(header);
+            }
+            return;
+        }
+        boolean aligned = false;
+        try {
+            // 时间先走：vivo 组子行的 header 里只有时间、没有应用名（实测 x=+126，压在
+            // 42dp 大图标的右半边），而下面 appName==null 会直接退出——旧代码因此从未维护过时间。
+            alignHeaderTime(row, header);
+            // 只认这份 header 子树里的应用名：行里可能同时存在收起/展开两份 header，
+            // 跨子树取值会把 padding 加到另一份上（实测出现过 x=99 配 hdrPad=159 的矛盾读数）
+            View appName = findViewByIdSuffixShown(header, "app_name_text");
+            if (appName == null || !appName.isShown() || appName.getWidth() <= 0) {
+                stopConverge(header);
+                return;
+            }
+            int[] al = new int[2];
+            int[] rl = new int[2];
+            appName.getLocationOnScreen(al);
+            row.getLocationOnScreen(rl);
+            final int x = al[0] - rl[0];
+            int want = NotifyRowSpec.dp(row.getContext(), NotifyRowSpec.COLUMN_DP);
+            final int d = want - x;
+            long now = android.os.SystemClock.uptimeMillis();
+            if (Math.abs(d) <= 2) {
+                aligned = true;
+            } else {
+                synchronized (HEADER_TEXT_STATE) {
+                    long[] st = HEADER_TEXT_STATE.get(appName);
+                    boolean sameAsLast = st != null && st[0] == x;
+                    // 位置没变且刚改过：布局还没跟上，重复加会过冲；
+                    // 位置没变但已过 250ms：说明被 vivo 布局重置回去了，要再补一次。
+                    boolean stale = st == null || now - st[1] > 250;
+                    if (!sameAsLast || stale) {
+                        HEADER_TEXT_STATE.put(appName, new long[]{x, now});
+                        shiftHeaderText(row, header, appName, d);
+                        if (isVerify(row.getContext())
+                                && sColLogOnce.add(Integer.toHexString(
+                                        System.identityHashCode(header)))) {
+                            // 每个 header 只打一次：这条是诊断，刷多了会把启动期的
+                            // g2/shelfgap/补挂见证冲出 logcat 窗口，门禁反而取不到证据
+                            Log.i(TAG, "notify_row.col x=" + x + " want=" + want
+                                    + " d=" + d + " same=" + (sameAsLast ? 1 : 0)
+                                    + " pkg=" + (sbnOf(row) == null ? "-"
+                                            : sbnOf(row).getPackageName()));
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        if (aligned) {
+            stopConverge(header);
+            return;
+        }
+        header.postDelayed(safe(() -> convergeHeaderColumn(row, header, pass + 1)), 100);
+    }
+
+    /**
+     * 把文本整体右移到目标列：子行的应用名由 `notification_top_line` 自己的左边距定位
+     * （实测 header padding 改了它不动），独立行/摘要则跟着 header padding 走。
+     * 先试真正承载文本的祖先，都不行才退回 header。
+     */
+    private static boolean shiftHeaderText(View row, View header, View appName, int delta) {
+        View cur = appName;
+        for (int up = 0; up < 4 && cur != null; up++) {
+            ViewGroup.LayoutParams lp = cur.getLayoutParams();
+            if (lp instanceof ViewGroup.MarginLayoutParams
+                    && viewIdName(cur).endsWith(":id/notification_top_line")) {
+                ViewGroup.MarginLayoutParams mlp = (ViewGroup.MarginLayoutParams) lp;
+                mlp.leftMargin += delta;
+                cur.setLayoutParams(mlp);
+                return true;
+            }
+            ViewParent p = cur.getParent();
+            cur = p instanceof View ? (View) p : null;
+        }
+        header.setPaddingRelative(header.getPaddingStart() + delta,
+                header.getPaddingTop(), header.getPaddingEnd(), header.getPaddingBottom());
+        // 写回缓存，免得下一次 polish 用公式初值把它回退
+        LIGHT_COLUMN_HEADER.put(header, header.getPaddingStart());
+        return true;
+    }
+
+    private static void stopConverge(View header) {
+        synchronized (HEADER_CONVERGING) {
+            HEADER_CONVERGING.remove(header);
+        }
+    }
+
+    /**
+     * 圆角见证：逐行只读打印角色、当前 top/bottom 系数、半径来源与背景四角。
+     * A13 的行挂在 VivoCustomStackSection 下，必须递归；只用于验收，不写任何状态。
+     */
+    private static void dumpRoundness(View stack, String phase) {
+        try {
+            if (!(stack instanceof ViewGroup) || !isVerify(stack.getContext())) {
+                return;
+            }
+            ViewGroup g = (ViewGroup) stack;
+            Log.i(TAG, "notify_row.roundness phase=" + phase
+                    + " stack=" + g.getClass().getSimpleName()
+                    + " n=" + g.getChildCount()
+                    + " mirror=" + (Os5Mirror.enabled() ? 1 : 0));
+            dumpRoundnessInto(g, phase, "", 0);
+        } catch (Throwable t) {
+            Log.w(TAG, "notify_row.roundness dump failed", t);
+        }
+    }
+
+    private static void dumpRoundnessInto(ViewGroup g, String phase, String path, int depth) {
+        if (depth > 4) {
+            return;
+        }
+        for (int i = 0; i < g.getChildCount(); i++) {
+            View c = g.getChildAt(i);
+            if (c == null) {
+                continue;
+            }
+            String cn = c.getClass().getName();
+            boolean shelf = cn.endsWith(".NotificationShelf");
+            if (shelf || cn.endsWith(".ExpandableNotificationRow")) {
+                logRoundnessRow(c, phase, path + i, shelf);
+            }
+            if (c instanceof ViewGroup) {
+                dumpRoundnessInto((ViewGroup) c, phase, path + i + ">", depth + 1);
+            }
+        }
+    }
+
+    private static void logRoundnessRow(View c, String phase, String path, boolean shelf) {
+        float top = -1f;
+        float bot = -1f;
+        float outline = -1f;
+        try {
+            Object v = XposedHelpers.callMethod(c, "getCurrentTopRoundness");
+            if (v instanceof Float) {
+                top = ((Float) v).floatValue();
+            }
+            v = XposedHelpers.callMethod(c, "getCurrentBottomRoundness");
+            if (v instanceof Float) {
+                bot = ((Float) v).floatValue();
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            outline = XposedHelpers.getFloatField(c, "mOutlineRadius");
+        } catch (Throwable ignored) {
+        }
+        String radii = "none";
+        try {
+            Object bg = XposedHelpers.getObjectField(c, "mBackgroundNormal");
+            Object arr = bg == null ? null
+                    : XposedHelpers.getObjectField(bg, "mCornerRadii");
+            if (arr instanceof float[]) {
+                float[] a = (float[]) arr;
+                StringBuilder sb = new StringBuilder("[");
+                for (int k = 0; k < a.length; k++) {
+                    if (k > 0) {
+                        sb.append(',');
+                    }
+                    sb.append(String.format(java.util.Locale.US, "%.0f", a[k]));
+                }
+                radii = sb.append(']').toString();
+            }
+        } catch (Throwable ignored) {
+        }
+        String pkg = "-";
+        try {
+            StatusBarNotification s = sbnOf(c);
+            if (s != null) {
+                pkg = s.getPackageName();
+            }
+        } catch (Throwable ignored) {
+        }
+        Log.i(TAG, "notify_row.roundness phase=" + phase
+                + " path=" + path
+                + " shelf=" + (shelf ? 1 : 0)
+                + " sum=" + (bool(c, "isSummaryWithChildren") ? 1 : 0)
+                + " child=" + (bool(c, "isChildInGroup") ? 1 : 0)
+                + " pkg=" + pkg
+                + " top=" + f2(top) + " bot=" + f2(bot)
+                + " R=" + f2(outline)
+                + " radii=" + radii
+                + " mirror=" + (Os5Mirror.enabled() ? 1 : 0));
+    }
+
+    private static String f2(float v) {
+        return String.format(java.util.Locale.US, "%.2f", v);
+    }
+
+    private static void registerSepObserver(final Context ctx) {
+        if (sSepObserver) {
+            return;
+        }
+        sSepObserver = true;
+        try {
+            sSepMode = sepMode(ctx);
+            ContentObserver observer = new ContentObserver(
+                    new Handler(Looper.getMainLooper())) {
+                @Override
+                public void onChange(boolean self) {
+                    sSepMode = sepMode(ctx);
+                    java.util.List<View> stacks;
+                    synchronized (LIGHT_STACKS) {
+                        stacks = new java.util.ArrayList<>(LIGHT_STACKS.keySet());
+                    }
+                    for (View st : stacks) {
+                        if (st != null) {
+                            applyLightSeparation(st, st.getContext());
+                            st.invalidate();
+                        }
+                    }
+                }
+            };
+            ctx.getContentResolver().registerContentObserver(
+                    Settings.Global.getUriFor(Prefs.optionKey("notify_row", "sep")),
+                    false, observer);
+        } catch (Throwable t) {
+            sSepObserver = false;
+        }
+    }
 
     /**
      * OS3(A13) 的行圆角只认 row.setTopRoundness/setBottomRoundness（像素），
@@ -1509,6 +2427,60 @@ public final class NotifyRowFeature extends Feature {
         }
     }
 
+    /** 按资源 id 名后缀 DFS 查找（vivo 的 header 不一定是 NotificationHeaderView 类）。 */
+    private static View findViewByIdSuffix(View root, String suffix) {
+        return findViewByIdSuffix(root, suffix, 0);
+    }
+
+    private static View findViewByIdSuffix(View v, String suffix, int depth) {
+        if (v == null || depth > 12) {
+            return null;
+        }
+        if (viewIdName(v).endsWith(":id/" + suffix)) {
+            return v;
+        }
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                View hit = findViewByIdSuffix(g.getChildAt(i), suffix, depth + 1);
+                if (hit != null) {
+                    return hit;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** 摘要行可能同时有收起/展开两份 header：优先返回真正可见的那一份。 */
+    private static View findViewByIdSuffixShown(View v, String suffix) {
+        View first = null;
+        try {
+            if (v == null) {
+                return null;
+            }
+            if (viewIdName(v).endsWith(":id/" + suffix)) {
+                if (v.isShown() && v.getHeight() > 0) {
+                    return v;
+                }
+                first = v;
+            }
+            if (v instanceof ViewGroup) {
+                ViewGroup g = (ViewGroup) v;
+                for (int i = 0; i < g.getChildCount(); i++) {
+                    View hit = findViewByIdSuffixShown(g.getChildAt(i), suffix);
+                    if (hit != null && hit.isShown() && hit.getHeight() > 0) {
+                        return hit;
+                    }
+                    if (first == null && hit != null) {
+                        first = hit;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return first;
+    }
+
     /** 未测量的 TextView 拿不到 Layout，日志取值不能直接点下去 */
     private static int lineCount(TextView tv) {
         android.text.Layout l = tv == null ? null : tv.getLayout();
@@ -1518,114 +2490,164 @@ public final class NotifyRowFeature extends Feature {
     private static final java.util.Set<String> sActionLogOnce =
             java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
 
-    private static void applyRowRoundness(View row, int radiusPx) {
-        try {
-            XposedHelpers.callMethod(row, "setTopRoundness", (float) radiusPx);
-            XposedHelpers.callMethod(row, "setBottomRoundness", (float) radiusPx);
-            XposedHelpers.callMethod(row, "applyRoundness");
-        } catch (Throwable ignored) {
-        }
-        // OS3 的行/父类都没人把圆角推给画卡片背景的 NotificationBackgroundView，
-        // 只设 roundness 只会裁内容、卡片仍是直角 —— 直接给它设半径。
-        setBackgroundRadius(row, radiusPx);
-    }
+    /**
+     * OS3(A13) 的 NotificationRoundnessManager 把**整个列表**当成一张连续卡：
+     * 只有 firstInStack 的 top 是圆的，最后一行因 shelf 存在 bottom 恒为 0，其余行取
+     * notification_corner_radius_small/corner（本机 = 0 ⇒ 直角）。所以 OS3 原生观感是
+     * "整列一张方卡 + 分隔线"，与 OS5 的"每个应用一张圆角卡"根本不同。
+     *
+     * 这里在 getRoundnessFraction 上按**卡片角色**给系数（只在 sep=os5 时接管）：
+     * - 独立行：top=1，bottom=1（自己一张卡）
+     * - 组摘要：top=1；组展开有可见子行时 bottom=0，否则 bottom=1
+     * - 组子行：top=0；末个可见子行 bottom=1，其余 0
+     * - shelf：top=1，bottom=1（OS5 收纳栏自身是一张独立圆角卡）
+     * 原生已判 1.0 的情形（滑动/清除中/首行/无栏末行）保持不动，避免打断动画。
+     */
+    /** 首次钩到 getRoundnessFraction 时记下的管理器实例，用于开关切换后强制重算。 */
+    private static volatile Object sRoundnessMgr;
 
-    private static final java.util.Map<Class<?>, Boolean> HAS_SET_RADIUS =
-            new java.util.HashMap<>();
-    private static final java.util.Set<String> sBgNames =
-            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
-
-    /** 不猜类名（vivo 会改名/加子类）：只要这个 View 有 setRadius(float) 就打半径 */
-    private static void setBackgroundRadius(View v, int radiusPx) {
-        Class<?> cls = v.getClass();
-        Boolean known;
-        synchronized (HAS_SET_RADIUS) {
-            known = HAS_SET_RADIUS.get(cls);
-            if (known == null) {
-                try {
-                    cls.getMethod("setRadius", float.class);
-                    known = Boolean.TRUE;
-                } catch (Throwable t) {
-                    known = Boolean.FALSE;
-                }
-                HAS_SET_RADIUS.put(cls, known);
-            }
-        }
-        if (known == Boolean.TRUE) {
-            if (sBgNames.add(cls.getName())) {
-                Log.i(TAG, "notify_row: card background view = " + cls.getName());
-            }
-            try {
-                XposedHelpers.callMethod(v, "setRadius", (float) radiusPx);
-                v.invalidate();
-            } catch (Throwable ignored) {
-            }
+    /** 让系统按当前开关重算所有行的圆角（切 sep 后旧值不会自己刷新）。 */
+    private static void refreshCardRoundness() {
+        Object m = sRoundnessMgr;
+        if (m == null) {
             return;
         }
-        if (v instanceof ViewGroup) {
-            ViewGroup g = (ViewGroup) v;
-            for (int i = 0; i < g.getChildCount(); i++) {
-                View c = g.getChildAt(i);
-                if (c != null) {
-                    setBackgroundRadius(c, radiusPx);
-                }
-            }
+        try {
+            XposedHelpers.callMethod(m, "updateNotificationRoundness");
+        } catch (Throwable t) {
+            Log.w(TAG, "notify_row: roundness refresh failed", t);
         }
     }
 
-    /**
-     * OS3 的行圆角由原生每轮布局重算，手动设一次会被冲掉；
-     * 所以直接拦 setter：feature 开着就把上下 roundness 钉成 20dp（iOS 是每张卡四角都圆）。
-     */
     private static void installRoundnessHooks(ClassLoader cl) {
         try {
-            Class<?> row = XposedHelpers.findClass(
-                    "com.android.systemui.statusbar.notification.row.ExpandableNotificationRow", cl);
-            XC_MethodHook force = new XC_MethodHook() {
+            final Class<?> mgr = XposedHelpers.findClass(
+                    "com.android.systemui.statusbar.notification.stack.NotificationRoundnessManager",
+                    cl);
+            XC_MethodHook card = new XC_MethodHook() {
                 @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
+                protected void afterHookedMethod(MethodHookParam param) {
                     try {
-                        if (param.args == null || param.args.length < 1
-                                || !(param.args[0] instanceof Float)) {
+                        sRoundnessMgr = param.thisObject;
+                        if (!Os5Mirror.enabled() || param.args == null || param.args.length < 2
+                                || !(param.args[0] instanceof View)
+                                || !(param.args[1] instanceof Boolean)) {
                             return;
                         }
-                        View self = (View) param.thisObject;
-                        Context ctx = self.getContext();
-                        if (!Prefs.featureEnabled(ctx, "notify_row", false)
-                                || !"ios".equals(Prefs.option(ctx, "notify_row",
-                                "stack_metrics", "ios"))) {
+                        // 独立行/子行的 header 文本列会被 vivo 布局重置，借这个每轮必调的钩子常态维护。
+                        // 组摘要不参与：它保持原生 16dp 小图标与原生 header 排版。
+                        final View v = (View) param.args[0];
+                        if (v.getClass().getName().endsWith(".ExpandableNotificationRow")
+                                && !bool(v, "isSummaryWithChildren")) {
+                            v.post(safe(() -> maybeConvergeHeader(v)));
+                        }
+                        Object r = param.getResult();
+                        float nativeV = r instanceof Float ? ((Float) r).floatValue() : -1f;
+                        if (nativeV >= 0.999f) {
                             return;
                         }
-                        if (isLightStyle(ctx)) {
-                            if (ROUNDNESS_LIGHT_LOGGED.compareAndSet(false, true)) {
-                                Log.i(TAG, "notify_row: roundness untouched (light style)");
-                            }
+                        // 原生给的是 0~1 之间的分数 ⇒ 这是 NotificationShelf
+                        // .updateCornerRoundnessOnScroll 正在做的滚动过渡，不能被卡片值打断，
+                        // 否则"从收纳栏划回来"会看到圆角突然丢失。
+                        if (nativeV > 0.001f && nativeV < 0.999f) {
                             return;
                         }
-                        param.args[0] = (float) NotifyRowSpec.dp(ctx, 20);
+                        final View rv = (View) param.args[0];
+                        // 收纳栏上方/正在滑动的行由 shelf 自己裁决（同上一条理由）
+                        if (bool(rv, "isAboveShelf") || bool(rv, "isHeadsUp")
+                                || swipeAffected(rv)) {
+                            return;
+                        }
+                        float want = cardRoundness((View) param.args[0],
+                                ((Boolean) param.args[1]).booleanValue());
+                        if (want >= 0f) {
+                            param.setResult(want);
+                        }
                     } catch (Throwable ignored) {
                     }
                 }
             };
-            XposedBridge.hookAllMethods(row, "setTopRoundness", force);
-            XposedBridge.hookAllMethods(row, "setBottomRoundness", force);
-            Log.i(TAG, "notify_row: roundness pinned");
+            int hits = XposedBridge.hookAllMethods(mgr, "getRoundnessFraction", card).size();
+            Log.i(TAG, "notify_row: card roundness hook hits=" + hits);
+            if (hits == 0) {
+                Log.w(TAG, "notify_row: card roundness hook missed (getRoundnessFraction)");
+            }
         } catch (Throwable t) {
             Log.w(TAG, "notify_row: roundness hook failed", t);
         }
     }
 
-    private static void applyRoundnessToRows(View stack, int radiusPx) {
-        if (!(stack instanceof ViewGroup)) {
-            return;
+    /** 该行是否正在被滑动（原生 `NotificationRoundnessManager.isViewAffectedBySwipe`）。 */
+    private static boolean swipeAffected(View v) {
+        Object mgr = sRoundnessMgr;
+        if (mgr == null) {
+            return false;
         }
-        ViewGroup g = (ViewGroup) stack;
+        try {
+            return Boolean.TRUE.equals(XposedHelpers.callMethod(mgr, "isViewAffectedBySwipe", v));
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** @return 该视图作为"卡片"应有的系数；<0 表示不接管（非通知行/非 shelf） */
+    private static float cardRoundness(View v, boolean top) {
+        String cn = v.getClass().getName();
+        if (cn.endsWith(".NotificationShelf")) {
+            return 1f;
+        }
+        if (!cn.endsWith(".ExpandableNotificationRow")) {
+            return -1f;
+        }
+        if (bool(v, "isChildInGroup") || inChildrenContainer(v)) {
+            if (top) {
+                return 0f;
+            }
+            return isLastVisibleGroupChild(v) ? 1f : 0f;
+        }
+        if (bool(v, "isSummaryWithChildren")) {
+            if (top) {
+                return 1f;
+            }
+            return bool(v, "isGroupExpanded") && hasVisibleGroupChild(v) ? 0f : 1f;
+        }
+        return 1f;
+    }
+
+    private static ViewGroup groupParent(View row) {
+        ViewParent p = row.getParent();
+        return p instanceof ViewGroup ? (ViewGroup) p : null;
+    }
+
+    private static boolean hasVisibleGroupChild(View summaryOrChild) {
+        ViewGroup g = groupParent(summaryOrChild);
+        if (g == null) {
+            return false;
+        }
         for (int i = 0; i < g.getChildCount(); i++) {
             View c = g.getChildAt(i);
-            if (c != null && c.getClass().getName().endsWith(".ExpandableNotificationRow")) {
-                applyRowRoundness(c, radiusPx);
+            if (c != null && c.getClass().getName().endsWith(".ExpandableNotificationRow")
+                    && c.getVisibility() == View.VISIBLE && !bool(c, "isRemoved")) {
+                return true;
             }
         }
+        return false;
+    }
+
+    private static boolean isLastVisibleGroupChild(View row) {
+        ViewGroup g = groupParent(row);
+        if (g == null) {
+            return false;
+        }
+        View last = null;
+        for (int i = 0; i < g.getChildCount(); i++) {
+            View c = g.getChildAt(i);
+            if (c != null && c.getClass().getName().endsWith(".ExpandableNotificationRow")
+                    && c.getVisibility() == View.VISIBLE && !bool(c, "isRemoved")) {
+                last = c;
+            }
+        }
+        return last == row;
     }
 
     private static void applyStackMetrics(View stack) {
@@ -1635,8 +2657,9 @@ public final class NotifyRowFeature extends Feature {
                 return;
             }
             if (isLightStyle(ctx)) {
+                applyLightSeparation(stack, ctx);
                 if (LIGHT_METRICS_LOGGED.compareAndSet(false, true)) {
-                    Log.i(TAG, "notify_row: light keeps native list metrics");
+                    Log.i(TAG, "notify_row: light keeps native list metrics sep=" + sSepMode);
                 }
                 return;
             }
@@ -1665,7 +2688,6 @@ public final class NotifyRowFeature extends Feature {
             setIntIfPresent(stack, "mCornerRadius", corner);
             // A13 的子项间距叫 mChildPadding；侧边距与圆角由我们自绘的卡片负责
             setIntIfPresent(stack, "mChildPadding", gap);
-            applyRoundnessToRows(stack, corner);
             Object algo = null;
             try {
                 algo = XposedHelpers.getObjectField(stack, "mStackScrollAlgorithm");
@@ -2185,10 +3207,12 @@ public final class NotifyRowFeature extends Feature {
     }
 
     /** 摘掉原生优化的大图标，并还原被隐藏的原生 header 小图标 */
-    private static void clearLightBigIcon(View root) {
+    private static void clearLightBigIcon(View root, String why) {
         View nativeIcon = LIGHT_NATIVE_ICON.remove(root);
         if (nativeIcon != null) {
             nativeIcon.setAlpha(1f);
+            // 按住期间压过 scale/可见性，必须一起恢复：否则大图标被摘掉后原生小图标永不回来
+            suppressNativeIcon(nativeIcon, false);
             int[] old = LIGHT_ICON_LP.remove(nativeIcon);
             if (old != null) {
                 ViewGroup.LayoutParams lp = nativeIcon.getLayoutParams();
@@ -2199,20 +3223,61 @@ public final class NotifyRowFeature extends Feature {
                 }
             }
         }
+        boolean removed = false;
         if (root instanceof ViewGroup) {
             ViewGroup g = (ViewGroup) root;
             for (int i = g.getChildCount() - 1; i >= 0; i--) {
                 View c = g.getChildAt(i);
                 if (TAG_LIGHT_BIG.equals(c.getTag())) {
+                    // 标签一起清掉：正在淡出的那枚如果被这轮复用，它的 endAction 就不该
+                    // 再来摘除/清标记（否则会把刚 polish 完的行标成"没打磨"）。
+                    c.setTag(null);
                     g.removeViewAt(i);
+                    removed = true;
                 }
+            }
+        }
+        if (sVerifyEnabled && removed) {
+            // "图标瞬间消失"到底是哪条路径摘的，只有这条日志能回答；硬删都是观感缺陷的候选
+            Log.i(TAG, "notify_row.light.icon removed why=" + why + " row="
+                    + Integer.toHexString(System.identityHashCode(root)));
+        }
+    }
+
+    /** 淡出结束后收尾：真的摘掉图标，并让补扫有权在它再次长高时重新 polish。 */
+    private static void retireLightIcon(View root) {
+        clearLightBigIcon(root, "fade-out");
+        View cv = lightContentViewOf(root);
+        if (cv == null) {
+            return;
+        }
+        synchronized (LIGHT_POLISHED) {
+            LIGHT_POLISHED.remove(cv);
+        }
+        View row = rowOf(cv);
+        if (row != null) {
+            synchronized (HEAL_TRIES) {
+                HEAL_TRIES.remove(row);
             }
         }
     }
 
+    /** 从图标宿主往上找那一行自己的 NotificationContentView */
+    private static View lightContentViewOf(View v) {
+        View cur = v;
+        for (int i = 0; i < 6 && cur != null; i++) {
+            if (cur.getClass().getName().endsWith(".NotificationContentView")) {
+                return cur;
+            }
+            ViewParent p = cur.getParent();
+            cur = p instanceof View ? (View) p : null;
+        }
+        return null;
+    }
+
     /**
-     * OS5 light：原生收起行的标题/正文从 12dp 起排，会被左侧 38dp 大图标压住；
-     * 按 iOS 卡同一列（66dp）右移，header 的应用名/时间也对齐到同一列。
+     * OS5 light：原生收起行的标题/正文从 12dp 起排，会被左侧 42dp 大图标压住；
+     * 按 OS5 内容列（66dp = 16 间距 + 42 图标 + 8 间隙）右移，header 的应用名/时间也对齐到同一列。
      * 行会被复用，最终内边距记在 view 上，重复调用不会累加。
      */
     private static void alignLightColumn(Context ctx, View root, TextView anchor) {
@@ -2333,8 +3398,184 @@ public final class NotifyRowFeature extends Feature {
         return s;
     }
 
-    /** OS5 light：图标对齐到标题→正文的文字块中心；空摘要行保持整行居中 */
-    private static void alignLightIcon(View root, View icon, int size) {
+    /** 组子行才做 alpha 过渡：普通行绑定时硬切，滚动列表逐行淡入反而更花。 */
+    private static final WeakHashMap<View, Boolean> LIGHT_ICON_CHILD = new WeakHashMap<>();
+    /** 图标的淡出/淡入目标：布局回调每帧都会走 fadeLightIcon，靠它避免每帧重启动画。 */
+    private static final WeakHashMap<View, Float> LIGHT_ICON_WANT = new WeakHashMap<>();
+    private static final android.view.animation.Interpolator ICON_FADE_INTERP =
+            new android.view.animation.PathInterpolator(0.25f, 0.1f, 0.25f, 1f);
+
+    /**
+     * 大图标 alpha 过渡。target=0 时**动画真正结束才摘除**：收起过程中用户又展开的话，
+     * 后一次 animate() 取消前一次，endAction 不执行（框架保证），图标就从当前半透明
+     * 顺势淡回来，不会出现"消失一帧再冒出来"。
+     */
+    private static void fadeLightIcon(final View root, final View icon, final float target,
+                                      final String why) {
+        if (root == null || icon == null) {
+            return;
+        }
+        float from = icon.getAlpha();
+        if (Math.abs(from - target) < 0.01f) {
+            return;      // 已经在目标上：不重启动画，也不重新排 endAction
+        }
+        synchronized (LIGHT_ICON_WANT) {
+            Float want = LIGHT_ICON_WANT.get(icon);
+            // 已经在往这个方向淡了：布局回调每帧都会走这里，每帧重启就等于淡不完
+            if (want != null && Math.abs(want.floatValue() - target) < 0.01f) {
+                return;
+            }
+            LIGHT_ICON_WANT.put(icon, Float.valueOf(target));
+        }
+        if (sVerifyEnabled) {
+            Log.i(TAG, "notify_row.light.icon fade=" + (target > from ? "in" : "out")
+                    + " from=" + String.format(java.util.Locale.US, "%.2f", from)
+                    + " to=" + String.format(java.util.Locale.US, "%.2f", target)
+                    + " ms=" + NotifyRowSpec.ICON_FADE_MS + " why=" + why
+                    + " h=" + root.getHeight()
+                    + " row=" + Integer.toHexString(System.identityHashCode(root)));
+            sampleFade(icon, why);
+        }
+        if (target <= 0.5f) {
+            // 淡出时把原生小图标同时淡进来：只留大图标独自消失，尾巴上会空一帧再"蹦"出小图标
+            View nat = LIGHT_NATIVE_ICON.get(root);
+            if (nat != null && nat.getAlpha() > 0.01f) {
+                nat.setAlpha(0f);
+                // 按住期间它是 scale=0 + INVISIBLE：不先放开，alpha 动画就动画在画不出来的视图上，
+                // 大图标淡完之后那一格会一直空着
+                suppressNativeIcon(nat, false);
+                nat.animate().alpha(1f).setDuration(NotifyRowSpec.ICON_FADE_MS)
+                        .setInterpolator(ICON_FADE_INTERP).start();
+            }
+        }
+        icon.animate().alpha(target).setDuration(NotifyRowSpec.ICON_FADE_MS)
+                .setInterpolator(ICON_FADE_INTERP)
+                .withEndAction(new Runnable() {
+                    @Override
+                    public void run() {
+                        synchronized (LIGHT_ICON_WANT) {
+                            LIGHT_ICON_WANT.remove(icon);
+                        }
+                        // 标签已被摘走 = 这枚被后一次 polish 复用了，别去动那一行的状态
+                        if (target > 0.5f || !TAG_LIGHT_BIG.equals(icon.getTag())) {
+                            return;
+                        }
+                        retireLightIcon(root);
+                    }
+                })
+                .start();
+    }
+
+    /** 过渡是否真在爬：60/120/180ms 三个 alpha 读数就能证伪"其实还是硬切"。 */
+    private static void sampleFade(final View icon, final String why) {
+        for (int i = 1; i <= 3; i++) {
+            final int step = i;
+            icon.postDelayed(safe(() -> Log.i(TAG, "notify_row.light.icon ramp t="
+                    + (step * 60) + "ms alpha="
+                    + String.format(java.util.Locale.US, "%.2f", icon.getAlpha())
+                    + " why=" + why)), step * 60L);
+        }
+    }
+
+    /** 宿主是否已回到紧凑模板（真机实测：收起 57px，展开 200~300px） */
+    private static boolean isCompactHost(View host) {
+        return host != null && host.getHeight() > 0
+                && host.getHeight() < NotifyRowSpec.dp(host.getContext(), 70);
+    }
+
+    private static boolean isChildIcon(View icon) {
+        if (icon == null) {
+            return false;
+        }
+        synchronized (LIGHT_ICON_CHILD) {
+            return Boolean.TRUE.equals(LIGHT_ICON_CHILD.get(icon));
+        }
+    }
+
+    /**
+     * 这枚图标是否正在淡出（或已淡完还没被摘走）。对位与"这一轮该建图标"的判定都要认它，
+     * 否则收起动画里会出现：图标正在淡、却又被重新 align/重新 polish 成 alpha=1。
+     */
+    private static boolean isRetiringIcon(View icon) {
+        if (icon == null) {
+            return false;
+        }
+        synchronized (LIGHT_ICON_WANT) {
+            Float w = LIGHT_ICON_WANT.get(icon);
+            return w != null && w.floatValue() <= 0.5f;
+        }
+    }
+
+    /** 这一轮不该有图标：有就淡出（动画结束才真摘），没有就只还原被我们按住的原生小图标。 */
+    private static void dropLightIcon(View root, View existing, String why) {
+        if (existing != null) {
+            fadeLightIcon(root, existing, 0f, why);
+        } else {
+            clearLightBigIcon(root, why);
+        }
+    }
+
+    /** 收起入口的见证配额：每翻一次打一行，封顶 8 条；取样本身不许把别的证据挤出缓冲区。 */
+    private static int sCollapseWitnesses;
+
+    /** 收集一棵子树里我们自加的大图标：组收起时要把它们一次性淡掉。 */
+    private static void collectLightIcons(ViewGroup g, java.util.List<View> out, int depth) {
+        if (g == null || depth > 6) {
+            return;
+        }
+        for (int i = 0; i < g.getChildCount(); i++) {
+            View c = g.getChildAt(i);
+            if (c == null) {
+                continue;
+            }
+            if (TAG_LIGHT_BIG.equals(c.getTag())) {
+                out.add(c);
+            } else if (c instanceof ViewGroup) {
+                collectLightIcons((ViewGroup) c, out, depth + 1);
+            }
+        }
+    }
+
+    /**
+     * OS5 light：42dp 大图标纵向**居中于卡片**（8dp 内缩），文字块只作为"布局已就绪"的判据。
+     *
+     * 历史口径换过两次：纯按文字块居中在 A13 上低 30px（卡片顶上还有 34dp header），
+     * 于是改成"文字块中心与卡片中心的中点"，结果在组子行上稳定低 24px ——
+     * 那是公式自己的落点，不是没算对，补校多少轮都出不了验收线（L6 ≤20px）。
+     */
+    private static void alignLightIcon(final View root, final View icon, final int size) {
+        alignLightIcon(root, icon, size, 0);
+    }
+
+    /**
+     * 对齐输入的对数配额（每容器 3 条）：只打一次看不到收敛过程，
+     * 每次 pass 都打又会把别的见证从日志里挤掉 —— L6 停在 +24px 时，
+     * 必须看得出"最后一次写的是哪个 want"。
+     */
+    private static final WeakHashMap<View, Integer> ALIGN_LOGGED = new WeakHashMap<>();
+
+    private static synchronized boolean alignLogOnce(View v) {
+        if (v == null) {
+            return false;
+        }
+        if (ALIGN_LOGGED.size() > 64) {
+            ALIGN_LOGGED.clear();
+        }
+        int n = ALIGN_LOGGED.get(v) == null ? 0 : ALIGN_LOGGED.get(v);
+        if (n >= 3) {
+            return false;
+        }
+        ALIGN_LOGGED.put(v, n + 1);
+        return true;
+    }
+
+    /**
+     * pass 用来做"布局落定后再校一次"：polish 发生时行高常常还没长到最终值
+     * （真机见过 root 只有 138px 而行是 255px），那一刻的钳位会把图标压在顶部，
+     * 于是用户看到"这一条的图标偏上/偏下"。补两次（250ms / 700ms）即可覆盖重排。
+     */
+    private static void alignLightIcon(final View root, final View icon, final int size,
+            final int pass) {
         try {
             TextView title = text(root, "title");
             TextView body = firstText(root, "text", "big_text", "always");
@@ -2342,22 +3583,232 @@ public final class NotifyRowFeature extends Feature {
             View bottomV = body != null && body != title ? body : title;
             if (topV == null || bottomV == null
                     || topV.getHeight() <= 0 || bottomV.getHeight() <= 0) {
+                if (sVerifyEnabled && alignLogOnce(root)) {
+                    // 分不清"算错"还是"压根没算"时，这条就是那半个答案
+                    Log.i(TAG, "notify_row.align pass=" + pass + " no-text"
+                            + " title=" + (title == null ? "null" : title.getHeight())
+                            + " body=" + (body == null ? "null" : body.getHeight())
+                            + " h=" + root.getHeight());
+                }
                 return;
             }
+            View parent = icon.getParent() instanceof View ? (View) icon.getParent() : root;
             int[] tl = new int[2];
             int[] bl = new int[2];
-            int[] rl = new int[2];
+            int[] pl = new int[2];
             topV.getLocationOnScreen(tl);
             bottomV.getLocationOnScreen(bl);
-            root.getLocationOnScreen(rl);
-            int top = tl[1] - rl[1];
-            int bottom = bl[1] - rl[1] + bottomV.getHeight();
-            int desired = (top + bottom - size) / 2;
-            int max = Math.max(0, root.getHeight() - size);
-            desired = Math.max(0, Math.min(desired, max));
-            icon.setTranslationY(desired - icon.getTop());
+            parent.getLocationOnScreen(pl);
+            // 参照物 = 图标自己的宿主（status_bar_latest_event_content）。
+            // 真机取证否掉了"往上找 ExpandableNotificationRow"那版：组子行的祖先链上
+            // 会先撞到一个 297px 的孪生行（同一行的另一份拷贝/过渡态），而 dump 里可见的行
+            // 是 255px —— 按 297 的中点摆，图标就稳定低 (297-255)/2 ≈ 21px（L6 的那 20.5px）。
+            // 宿主与可见行在四行取证里逐条同界（1107..1362 == 1107..1362），所以以宿主为准。
+            int cardTop = pl[1];
+            int cardH = parent.getHeight();
+            if (cardH <= 0) {
+                cardH = root.getHeight();
+            }
+            // 全程用**屏幕坐标**算，最后才换算成父容器里的 translationY。
+            // 旧写法把 root（内容 FrameLayout）当卡片：A13 上它常比行矮一截，
+            // `max = root.h - size` 的钳位就把图标钉在 root 顶部（真机 138px 那帧留下 -52px），
+            // 而验收 L6 量的是**行**的中心 —— 两边不同源，怎么补校都收敛不回去。
+            // 目标 = **卡片中心**（用户原话就是"大图标没居中"），8dp 内缩保证不越界；
+            // 文字块只用来判断布局是否就绪。旧口径取"文字块中心与卡片中心的中点"，
+            // 在组子行上稳定低 24px —— 那是公式本身的位置，补校再多轮也收敛不到验收线内。
+            int textCenter = (tl[1] + bl[1] + bottomV.getHeight()) / 2;
+            int cardCenter = cardTop + cardH / 2;
+            int inset = NotifyRowSpec.dp(icon.getContext(), 8);
+            int minCenter = cardTop + inset + size / 2;
+            int maxCenter = cardTop + Math.max(0, cardH - inset) - size / 2;
+            int center = maxCenter < minCenter ? cardCenter
+                    : Math.max(minCenter, Math.min(cardCenter, maxCenter));
+            int want = center - size / 2;
+            int min = Math.max(cardTop, pl[1]);
+            int maxTop = Math.min(cardTop + Math.max(0, cardH - size),
+                    pl[1] + Math.max(0, parent.getHeight() - size));
+            if (maxTop < min) {
+                maxTop = min;
+            }
+            boolean grew = want > maxTop;      // 卡片还没长到位：等布局落定再校，别现在就钳死
+            want = Math.max(min, Math.min(want, maxTop));
+            int baseTop = pl[1] + icon.getTop();
+            int drift = (want + size / 2) - (cardTop + cardH / 2);
+            if (sVerifyEnabled && alignLogOnce(root)) {
+                // 分不清"算错"还是"压根没算"时，这条就是那半个答案：输入量与钳位前后一起打。
+                Log.i(TAG, "notify_row.align pass=" + pass + " textC=" + textCenter
+                        + " card=[" + cardTop + "+" + cardH + "] rootH=" + root.getHeight()
+                        + " parentH=" + parent.getHeight() + " want=" + want
+                        + " base=" + baseTop + " ty=" + icon.getTranslationY()
+                        + " drift=" + drift + " grew=" + grew);
+            }
+            // 已经在这个位置上就**不写**：布局监听会让这里每轮都被调用，
+            // 无条件 setTranslationY 正是"点展开时所有大图标抖一下"的源头之一。
+            if (Math.abs(baseTop + icon.getTranslationY() - want) > 1f) {
+                icon.setTranslationY(want - baseTop);
+            }
+            // 收敛循环：**不管这一帧有没有钳位**都再校几次，直到落在 ±12px 内。
+            // 只在 grew（被钳）时才补校是上一版的失效方式：A13 上 pass=0 那帧卡片只有 255px、
+            // 297px 是之后才长出来的，没钳位不等于位置对，于是图标永久停在 +25px（验收 L6 红）。
+            if (pass < 4 && (grew || Math.abs(drift) > 12)) {
+                final int next = pass + 1;
+                icon.postDelayed(safe(() -> alignLightIcon(root, icon, size, next)),
+                        next <= 2 ? 250 : 700);
+            }
         } catch (Throwable ignored) {
         }
+    }
+
+    /**
+     * 把纵向对位挂到宿主的布局回调上。
+     *
+     * translationY 是"按当时宿主的几何算出来的偏移"，而图标本身是 CENTER_VERTICAL 布局的：
+     * 宿主随后被 vivo 重新布局（长高或整体位移）时，布局位置自己变了，我们写的偏移却没变 ——
+     * 真机上图标就停在"低 20px"那种固定增量上，补校轮数再多也只是在旧增量上再猜一次。
+     * 写入本身有判等跳过（见 alignLightIcon），所以每轮布局都回调也不会抖。
+     */
+    private static final WeakHashMap<View, View> ALIGN_LAYOUT_HOOK = new WeakHashMap<>();
+
+    private static void hookAlignOnLayout(View host, final View root, final View icon,
+                                          final int size) {
+        if (host == null) {
+            return;
+        }
+        synchronized (ALIGN_LAYOUT_HOOK) {
+            if (ALIGN_LAYOUT_HOOK.get(host) == icon) {
+                return;          // 同一宿主 + 同一图标只挂一次
+            }
+            ALIGN_LAYOUT_HOOK.put(host, icon);
+        }
+        host.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+            @Override
+            public void onLayoutChange(View v, int left, int top, int right, int bottom,
+                                       int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                // 尺寸**或位置**变了都要重算：vivo 会把内容框整体下移而不改它的高度，
+                // 只听高度变化就漏掉这一类，图标照样停在"低 20px"。
+                // 真正的写入由 alignLightIcon 自己判等跳过，所以这里不需要再节流。
+                if (isChildIcon(icon)) {
+                    if (isCompactHost(host)) {
+                        // 组收起：宿主回到紧凑高度就先把图标淡出去。
+                        // 等下一次 bind 再删，用户看到的就是"字压上去后再瞬间消失"。
+                        fadeLightIcon(host, icon, 0f, "child-collapse");
+                    } else if (isRetiringIcon(icon)) {
+                        // 淡出还没走完用户又展开了：顺势淡回来（动画被取消，摘除不会执行）
+                        fadeLightIcon(host, icon, 1f, "child-reopen");
+                    }
+                }
+                if (!isRetiringIcon(icon)) {
+                    alignLightIcon(root, icon, size);
+                }
+            }
+        });
+    }
+
+    /** 按住"露出来的原生小图标"，并把这个状态读回来当证据（每行只报一次，别淹掉别的见证）。 */
+    private static final java.util.Set<String> STRAY_NATIVE_SEEN =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+    /**
+     * 按住/放开原生 header 小图标。
+     *
+     * 为什么不是"压 alpha"：逐帧实测（`notify_row.trace`）显示 vivo 每次重排都把这颗图标的
+     * visibility 与 alpha 一起写回 `0:1.00`，我们下一帧再按成 `4:0.00` —— 两边逐帧对写，
+     * 中间那一帧就是用户看到的"别的通知小图标闪一下"。alpha/可见性都是**它的领地**，
+     * 而 drawable 自己的 alpha 它不碰：压成 0 之后视图再怎么被抬回可见也画不出东西，
+     * 且 drawable 还在 ⇒ 图标的 measure 尺寸不变（摘成 null 会让 header 的列数学塌掉，
+     * 真机门禁当场 L3 红）。
+     */
+    /** 取栈里第一个非本类、非 JDK 的帧，只给诊断用（栈展开比字符串裁剪便宜不了多少，别常开）。 */
+    private static String callerName() {
+        try {
+            StackTraceElement[] st = Thread.currentThread().getStackTrace();
+            for (StackTraceElement e : st) {
+                String c = e.getClassName();
+                if (c.contains("NotifyRowFeature") || c.startsWith("java.")
+                        || c.startsWith("android.os.") || c.startsWith("dalvik.")) {
+                    continue;
+                }
+                int dot = c.lastIndexOf('.');
+                return c.substring(dot + 1) + "." + e.getMethodName() + ":" + e.getLineNumber();
+            }
+        } catch (Throwable ignored) {
+        }
+        return "?";
+    }
+
+    private static void suppressNativeIcon(View ni, boolean on) {
+        if (ni == null) {
+            return;
+        }
+        if (!on && sVerifyEnabled && ni.getScaleX() == 0f) {
+            // 谁在放开：如果切歌窗口里这条出现，那就是我们自己的恢复路径在把图标放回可见，
+            // 而不是 vivo 抬回来的 —— 两者的修法完全不同
+            Log.i(TAG, "notify_row.light.native RELEASE id="
+                    + Integer.toHexString(System.identityHashCode(ni))
+                    + " from=" + callerName());
+        }
+        // 为什么不是"压视图 alpha/可见性"：逐帧实测（notify_row.trace）证明 vivo 每次重排会把
+        // 这四项一起写回可见，而我们自己的放开路径一条都没跑过（light.native RELEASE 0 条）
+        // ⇒ 按任何单一视图属性都是逐帧对写，中间那一帧就是用户看到的"闪一下"。
+        // 真正不争抢的只有 **drawable 自己的 alpha**：vivo 的图标更新才会换 drawable，
+        // 换的那一帧我们在守卫里再压一次即可（见 guardLightNativeIcon）。
+        if (ni instanceof ImageView) {
+            ImageView iv = (ImageView) ni;
+            android.graphics.drawable.Drawable d = iv.getDrawable();
+            if (d != null) {
+                // 不能把 drawable 摘成 null：那颗图标是 wrap_content，没有 drawable 就 measure 成 0，
+                // header 的列数学跟着塌 ⇒ 真机门禁当场 L3 红（标题左偏移 60px 而不是 66dp 列）。
+                // 所以改压 **drawable 自己的 alpha**：尺寸、布局、可见性全不动。
+                d.mutate().setAlpha(on ? 0 : 255);
+            }
+        }
+        // 视图 alpha/可见性只是"顺手维持"：真机证明 vivo 每次重排会把它们抬回可见，
+        // 所以不再依赖它们（连 scale 也一样守不住，已经去掉），真正挡画的是上面的 drawable alpha。
+        if (on) {
+            if (ni.getAlpha() != 0f) {
+                ni.setAlpha(0f);
+            }
+            if (ni.getVisibility() == View.VISIBLE) {
+                ni.setVisibility(View.INVISIBLE);
+            }
+        } else {
+            if (ni.getVisibility() != View.VISIBLE) {
+                ni.setVisibility(View.VISIBLE);
+            }
+        }
+    }
+
+    private static void pressStrayNativeIcon(View root, String where) {
+        View ni = LIGHT_NATIVE_ICON.get(root);
+        if (ni == null) {
+            // 登记丢了（或这一行的一份孪生根从来没按过）：先找回来再按，并把逐帧守卫补挂上，
+            // 否则 vivo 下一次写回 alpha=1 之后就再也没人压回去 —— 那就是持续露出，不是闪一帧
+            ni = findClass(root, "CachingIconView");
+            if (ni == null) {
+                return;
+            }
+            LIGHT_NATIVE_ICON.put(root, ni);
+            guardLightNativeIcon(root);
+        }
+        if (ni.getAlpha() == 0f && ni.getVisibility() != View.VISIBLE) {
+            return;
+        }
+        float was = ni.getAlpha();
+        int wasVis = ni.getVisibility();
+        suppressNativeIcon(ni, true);
+        if (!sVerifyEnabled) {
+            return;
+        }
+        String key = "stray|" + Integer.toHexString(System.identityHashCode(root));
+        synchronized (STRAY_NATIVE_SEEN) {
+            if (STRAY_NATIVE_SEEN.size() > 64 || !STRAY_NATIVE_SEEN.add(key)) {
+                return;
+            }
+        }
+        Log.i(TAG, "notify_row.light.native stray alpha="
+                + String.format(java.util.Locale.US, "%.2f", was)
+                + " where=" + where + " vis=" + wasVis + " row="
+                + Integer.toHexString(System.identityHashCode(root)));
     }
 
     /** 原生图标隐藏的逐帧兜底：原生更新可能把 small icon alpha 写回 1 */
@@ -2371,10 +3822,10 @@ public final class NotifyRowFeature extends Feature {
             LIGHT_ICON_GUARD.put(root, vto);
         }
         vto.addOnPreDrawListener(preDrawGuard(() -> {
-            View ni = LIGHT_NATIVE_ICON.get(root);
-            if (ni != null && ni.getAlpha() != 0f) {
-                ni.setAlpha(0f);
-            }
+            // vivo 每次重排都把这颗图标的 visibility/alpha 写回可见（逐帧见证 0:1.00），
+            // 我们同通道按回去就成了逐帧对写 —— 中间那一帧就是用户看到的"小图标闪一下"。
+            // 所以压制改走 scale（它从不碰那条），alpha/可见性只是顺手维持。
+            suppressNativeIcon(LIGHT_NATIVE_ICON.get(root), true);
         }));
     }
 
@@ -2428,30 +3879,160 @@ public final class NotifyRowFeature extends Feature {
         }));
     }
 
-    private static void applyLightPolish(View contentView, View root, boolean headsup) {
+    /** light polish 的早退原因见证：只打一次/（原因+包+行），避免绑定重放刷屏。 */
+    private static void lightSkip(String reason, View row, String extra) {
+        if (!sVerifyEnabled) {
+            return;
+        }
+        String pkg = "-";
         try {
-            clearLightBigIcon(root);
-            Context ctx = root.getContext();
-            // OS5 原生行已是「16dp 小图标 + 独立文字列」，大图标按 iOS 内容区度量放置；
-            // OS3 的 header 槽位窄，沿用原来的留宽 + 原生位置方案。
-            final boolean iosColumn = !OsProfile.isA13OrLower();
-            if (!(root instanceof FrameLayout) || !(contentView instanceof ViewGroup)) {
+            StatusBarNotification s = sbnOf(row);
+            if (s != null) {
+                pkg = s.getPackageName();
+            }
+        } catch (Throwable ignored) {
+        }
+        String key = reason + "|" + pkg + "|"
+                + (row == null ? 0 : System.identityHashCode(row));
+        if (!sLightSkips.add(key)) {
+            return;
+        }
+        Log.i(TAG, "notify_row.light.skip reason=" + reason + " pkg=" + pkg
+                + (extra == null ? "" : " " + extra));
+    }
+
+    private static final java.util.Set<String> sLightSkips =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+    /** witnessMarkedButEmpty 的去重：每个 (cv,可见根) 只打一次，补扫每秒都走这条不能刷屏。 */
+    private static final java.util.Set<String> MARKED_EMPTY_SEEN =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+    /**
+     * 这一行的哪一份子视图正被显示。收起/展开在 A13 上是**两棵子树**，补扫和对位都必须
+     * 画在可见的那一棵上（画到隐藏那份 = 没写，过渡结束才闪回来）。
+     */
+    private static View visibleRootOf(View cv) {
+        View root = currentContracted(cv);
+        try {
+            if (XposedHelpers.getIntField(cv, "mVisibleType") == 1) {
+                View exp = currentExpanded(cv);
+                if (exp != null) {
+                    root = exp;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return root;
+    }
+
+    /**
+     * 标记过期（cv 上写着"排好了"，可见根上却没有图标）时清掉标记，让这一轮补扫重排一次。
+     * 次数由 HEAL_TRIES（每行 ≤6）兜住，而不是"每个 (cv,根) 只清一次"：真机上收起再展开时，
+     * 第一趟重排常落在动画中途（行还没长够高，lightPolish 自己判 group-collapsed 早退），
+     * 只给一次机会就等于把这种行永久留在没有图标的状态上。
+     */
+    private static boolean rearmStalePolish(View cv, View shown) {
+        if (shown == null) {
+            return false;
+        }
+        synchronized (LIGHT_POLISHED) {
+            LIGHT_POLISHED.remove(cv);
+        }
+        if (sVerifyEnabled) {
+            Log.i(TAG, "notify_row.heal rearm cv=" + Integer.toHexString(System.identityHashCode(cv))
+                    + " root=" + Integer.toHexString(System.identityHashCode(shown)));
+        }
+        return true;
+    }
+
+    /**
+     * "去重标记说这行排好了，但可见的那一份根上找不到我们的图标"的见证（每个 cv|root 只打一次）。
+     * 没有它，"收起再展开后图标再也不回来"就分不清是①补扫没走到、②走到但被标记挡住、
+     * ③ polish 跑了但判成不该有图标。
+     */
+    private static void witnessMarkedButEmpty(View row, View cv, View root) {
+        if (!isVerify(row.getContext())) {
+            return;
+        }
+        if (root != null && root.findViewWithTag(TAG_LIGHT_BIG) != null) {
+            return;          // 标记说的是实话，这一行确实排好了
+        }
+        String key = Integer.toHexString(System.identityHashCode(cv)) + "|"
+                + Integer.toHexString(System.identityHashCode(root));
+        synchronized (MARKED_EMPTY_SEEN) {
+            if (MARKED_EMPTY_SEEN.size() > 64 || !MARKED_EMPTY_SEEN.add(key)) {
                 return;
+            }
+        }
+        Log.i(TAG, "notify_row.heal skip reason=marked-empty cv="
+                + Integer.toHexString(System.identityHashCode(cv))
+                + " root=" + Integer.toHexString(System.identityHashCode(root))
+                + " h=" + row.getHeight() + " vis=" + row.getVisibility()
+                + " pkg=" + (sbnOf(row) == null ? "-" : sbnOf(row).getPackageName()));
+    }
+
+    /**
+     * light polish 的完成标记（补扫用它判断"这行还要不要再打磨"）。
+     * 不能复用 RESTYLED / RESTYLED_ROWS：那两个键是 iOS 卡那套布局钩子的开关
+     * （calculateVisibleType 强制收起、onMeasure 钳高、setHeights 钳高、rejectExpand 拒绝展开），
+     * light 样式写上就会把这些行为一起带进来。
+     */
+    private static final WeakHashMap<View, Boolean> LIGHT_POLISHED = new WeakHashMap<>();
+
+    private static void applyLightPolish(View contentView, View root, boolean headsup) {
+        // 判定"不该有大图标"的早退分支（组收起/摘要/heads-up/样式不合）以前一律硬删，
+        // 用户看到的正是"展开时图标闪现、收起时字压上去后再瞬间消失"。
+        if (!lightPolish(contentView, root, headsup)) {
+            dropLightIcon(root, root instanceof ViewGroup
+                    ? ((ViewGroup) root).findViewWithTag(TAG_LIGHT_BIG) : null, "gate");
+        }
+    }
+
+    /** @return true = 这一轮已经把这行按大图标排好（含复用原有那枚） */
+    private static boolean lightPolish(View contentView, View root, boolean headsup) {
+        try {
+            // 先记下已存在的大图标：polish 必须幂等。销毁再新建会把 translationY 打回 0，
+            // 下一帧 post 才对齐 —— 这就是"点展开时所有大图标抖一下"的直接原因。
+            final ImageView recycled = root.findViewWithTag(TAG_LIGHT_BIG) instanceof ImageView
+                    ? (ImageView) root.findViewWithTag(TAG_LIGHT_BIG) : null;
+            Context ctx = root.getContext();
+            sVerifyEnabled = isVerify(ctx);
+            // OS5 的排版是唯一目标：42dp 大图标进内容列、标题上提、组展开子行同样走大图标。
+            // 不按版本关门——A13 的差异（header 槽位窄、主列从 header 下方开始）由
+            // alignLightColumn/alignLightIcon 逐项校正；关掉整段等于放弃目标观感。
+            if (!(root instanceof FrameLayout) || !(contentView instanceof ViewGroup)) {
+                lightSkip("not-frame", null, root.getClass().getSimpleName());
+                return false;
             }
             View rowView = rowOf(contentView);
             if (rowView == null || headsup) {
-                return;
+                lightSkip(headsup ? "headsup" : "no-row", rowView, null);
+                return false;
             }
-            // OS5 上同应用多条通知会被系统自动归组；light 也要覆盖摘要和子行
-            if (!iosColumn && (bool(rowView, "isSummaryWithChildren")
-                    || bool(rowView, "isChildInGroup") || inChildrenContainer(rowView))) {
-                return;
+            // 分组摘要保持原生：42dp 图标塞进 44dp 的摘要 header 会成"大头"（用户否决）。
+            if (bool(rowView, "isSummaryWithChildren")) {
+                lightSkip("summary", rowView, null);
+                return false;
+            }
+            boolean groupChild = bool(rowView, "isChildInGroup")
+                    || inChildrenContainer(rowView);
+            // 子行要不要建大图标，不能用"组是否展开"判：vivo OS3 把组默认摊开显示，
+            // 容器仍报 mChildrenExpanded=false / isGroupExpanded=false / isExpanded=false
+            // （真机 group-collapsed 见证里逐条实测到）。真正的信号是子行自己有没有按完整高度布局：
+            // 收起态紧凑模板 57px(19dp)，展开后 200~300px。
+            if (groupChild && !groupExpanded(rowView)
+                    && rowView.getHeight() < NotifyRowSpec.dp(ctx, 70)) {
+                lightSkip("group-collapsed", rowView, groupDbg(rowView)
+                        + " h=" + rowView.getHeight());
+                return false;
             }
             Object tag = root.getTag();
             String style = tag == null ? "" : tag.toString();
             if (!"base".equals(style) && !"big".equals(style) && !"bigText".equals(style)
                     && !"inbox".equals(style) && !"bigPicture".equals(style)) {
-                return;
+                lightSkip("style", rowView, "tag=" + style);
+                return false;
             }
             Object wrapper = null;
             try {
@@ -2464,140 +4045,114 @@ public final class NotifyRowFeature extends Feature {
             if (wrapperName.contains("CustomViewWrapper") || wrapperName.contains("Media")
                     || wrapperName.contains("ConversationTemplate")
                     || wrapperName.contains("CallTemplate")) {
-                return;
+                lightSkip("wrapper", rowView, "cls=" + wrapperName);
+                return false;
             }
             StatusBarNotification sbn = sbnOf(rowView);
             if (sbn == null || sbn.getNotification() == null) {
-                return;
+                lightSkip("sbn", rowView, null);
+                return false;
             }
             Notification n = sbn.getNotification();
             if (Notification.CATEGORY_TRANSPORT.equals(n.category)
                     || (n.extras != null
                     && n.extras.getParcelable(Notification.EXTRA_MEDIA_SESSION) != null)
                     || androidView(root, "media_actions") != null) {
-                return;
+                lightSkip("media", rowView, null);
+                return false;
             }
             TextView title = text(root, "title");
             TextView body = firstText(root, "text", "big_text", "always");
             CharSequence titleText = title == null ? null : title.getText();
             CharSequence bodyText = body != null && body != title ? body.getText() : null;
-            if (TextUtils.isEmpty(titleText) && TextUtils.isEmpty(bodyText)) {
-                // OS5 的自动归组摘要是系统生成的空正文行；header 仍要套大图标排版
-                if (!iosColumn) {
-                    Log.i(TAG, "notify_row: light skip blank row pkg=" + sbn.getPackageName());
-                    return;
-                }
-            }
-            if (iosColumn) {
-                sVerifyEnabled = isVerify(ctx);
-                // 展开/收起时让同一枚大图标连续飞过去，而不是两个子视图各画一枚硬切
-                ensureFlight(contentView);
-                guardLightMorph(contentView);
-            }
+            // OS5 的自动归组摘要是系统生成的空正文行，header 仍要套大图标排版，所以不按空文本跳过
+            // 展开/收起时让同一枚大图标连续飞过去，而不是两个子视图各画一枚硬切
+            ensureFlight(contentView);
+            guardLightMorph(contentView);
             int big = 0;
             final View nativeIcon = findClass(root, "CachingIconView");
-            // OS5 展开视图可能没有 CachingIconView，大图标照样要建；OS3 仍只在找到原生图标时接管
-            if (nativeIcon != null || iosColumn) {
-                int size = NotifyRowSpec.dp(ctx, iosColumn ? LIGHT_ICON_DP : 38);
-                // OS3：让 native header 给 38dp 图标留出槽位宽度（高度仍由 header 决定，
-                // 但小图标会被隐藏，不再缩放它）。OS5 保持原生槽位不动，避免 header 文字位移。
-                if (!iosColumn && nativeIcon != null) {
-                    ViewGroup.LayoutParams nlp = nativeIcon.getLayoutParams();
-                    if (nlp != null && nlp.width != size) {
-                        if (!LIGHT_ICON_LP.containsKey(nativeIcon)) {
-                            LIGHT_ICON_LP.put(nativeIcon, new int[]{nlp.width, nlp.height});
-                        }
-                        nlp.width = size;
-                        nativeIcon.setLayoutParams(nlp);
-                    }
+            // OS5 展开视图可能没有 CachingIconView，大图标照样要建
+            int size = NotifyRowSpec.dp(ctx, LIGHT_ICON_DP);
+            // 复用上一枚实例：translationY 是视图属性，跨 detach/attach 保留，
+            // 所以重绑/重排时不会再出现"先回原位再跳过来"的一帧
+            ImageView bigIcon = recycled != null ? recycled : new ImageView(ctx);
+            bigIcon.setTag(TAG_LIGHT_BIG);
+            bigIcon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            bigIcon.setClipToOutline(true);
+            final int corner = NotifyRowSpec.dp(ctx, LIGHT_ICON_CORNER_DP);
+            bigIcon.setOutlineProvider(new ViewOutlineProvider() {
+                @Override
+                public void getOutline(View view, Outline outline) {
+                    outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), corner);
                 }
-                ImageView bigIcon = new ImageView(ctx);
-                bigIcon.setTag(TAG_LIGHT_BIG);
-                bigIcon.setScaleType(ImageView.ScaleType.FIT_CENTER);
-                bigIcon.setClipToOutline(true);
-                final int corner = NotifyRowSpec.dp(ctx, iosColumn
-                        ? LIGHT_ICON_CORNER_DP : NotifyRowSpec.ICON_CORNER_DP);
-                bigIcon.setOutlineProvider(new ViewOutlineProvider() {
-                    @Override
-                    public void getOutline(View view, Outline outline) {
-                        outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), corner);
-                    }
-                });
-                Drawable appDrawable = appIcon(ctx, sbn.getPackageName());
-                if (appDrawable == null && nativeIcon instanceof ImageView) {
-                    appDrawable = ((ImageView) nativeIcon).getDrawable();
-                }
-                bigIcon.setImageDrawable(appDrawable);
-                bigIcon.setClickable(true);
-                bigIcon.setFocusable(false);
-                bigIcon.setImportantForAccessibility(
-                        View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-                final View rowRef = rowView;
-                bigIcon.setOnClickListener(v -> rowRef.performClick());
-                bigIcon.setOnLongClickListener(v -> longClickRow(rowRef));
-                ((ViewGroup) root).addView(bigIcon,
-                        new FrameLayout.LayoutParams(size, size));
-                // OS5：42dp 应用图标放左侧 16dp；纵向对齐在布局后按标题→正文文字块居中
-                if (iosColumn) {
-                    FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(size, size);
-                    flp.gravity = Gravity.CENTER_VERTICAL | Gravity.START;
-                    flp.setMarginStart(NotifyRowSpec.dp(ctx, NotifyRowSpec.GUTTER_DP));
-                    bigIcon.setLayoutParams(flp);
-                }
-                if (nativeIcon != null) {
-                    nativeIcon.setAlpha(0f);
-                    LIGHT_NATIVE_ICON.put(root, nativeIcon);
-                    guardLightNativeIcon(root);
-                }
-                final View header = findClass(root, "NotificationHeaderView");
-                final View rootRef = root;
-                final View iconRef = bigIcon;
-                iconRef.post(() -> {
-                    try {
-                        if (iosColumn) {
-                            alignLightIcon(rootRef, iconRef, size);
-                            iconRef.bringToFront();
-                            return;
-                        }
-                        if (nativeIcon == null) {
-                            iconRef.bringToFront();
-                            return;
-                        }
-                        int[] il = new int[2];
-                        int[] rl = new int[2];
-                        nativeIcon.getLocationOnScreen(il);
-                        rootRef.getLocationOnScreen(rl);
-                        int left = il[0] - rl[0];
-                        int top;
-                        if (header != null) {
-                            int[] hl = new int[2];
-                            header.getLocationOnScreen(hl);
-                            top = hl[1] - rl[1]
-                                    + Math.max(0, (header.getHeight() - size) / 2);
-                        } else {
-                            top = Math.max(0, (rootRef.getHeight() - size) / 2);
-                        }
-                        if (il[0] == 0 && il[1] == 0) {
-                            // 尚未 attach/布局：退回相对坐标
-                            left = nativeIcon.getLeft();
-                            top = header == null ? 0 : header.getTop()
-                                    + Math.max(0, (header.getHeight() - size) / 2);
-                        }
-                        iconRef.setX(left);
-                        iconRef.setY(top);
-                        iconRef.bringToFront();
-                    } catch (Throwable ignored) {
-                    }
-                });
-                big = 1;
+            });
+            Drawable appDrawable = appIcon(ctx, sbn.getPackageName());
+            if (appDrawable == null && nativeIcon instanceof ImageView) {
+                appDrawable = ((ImageView) nativeIcon).getDrawable();
             }
+            if (appDrawable != null || bigIcon.getDrawable() == null) {
+                bigIcon.setImageDrawable(appDrawable);
+            }
+            bigIcon.setClickable(true);
+            bigIcon.setFocusable(false);
+            bigIcon.setImportantForAccessibility(
+                    View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            final View rowRef = rowView;
+            bigIcon.setOnClickListener(v -> rowRef.performClick());
+            bigIcon.setOnLongClickListener(v -> longClickRow(rowRef));
+            // OS5：42dp 应用图标放左侧 16dp；纵向对齐在布局后按标题→正文文字块居中
+            FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(size, size);
+            flp.gravity = Gravity.CENTER_VERTICAL | Gravity.START;
+            flp.setMarginStart(NotifyRowSpec.dp(ctx, NotifyRowSpec.GUTTER_DP));
+            if (bigIcon.getParent() instanceof ViewGroup) {
+                ((ViewGroup) bigIcon.getParent()).removeView(bigIcon);
+            }
+            ((ViewGroup) root).addView(bigIcon, flp);
+            // 组子行是被展开动画"揭示"出来的：新建那枚从 0 淡进，回收来的那枚从当前值淡回 1，
+            // 而不是在动画中段硬闪一下（用户报的"闪现"就是这个）。普通行不淡入：
+            // 滚动列表里逐行淡反而更花。
+            synchronized (LIGHT_ICON_CHILD) {
+                LIGHT_ICON_CHILD.put(bigIcon, Boolean.valueOf(groupChild));
+            }
+            if (groupChild) {
+                if (recycled == null) {
+                    bigIcon.setAlpha(0f);
+                }
+                fadeLightIcon(root, bigIcon, 1f, "child-expand");
+            }
+            if (nativeIcon != null) {
+                suppressNativeIcon(nativeIcon, true);
+                LIGHT_NATIVE_ICON.put(root, nativeIcon);
+                guardLightNativeIcon(root);
+            }
+            final View rootRef = root;
+            final View iconRef = bigIcon;
+            iconRef.post(() -> {
+                try {
+                    alignLightIcon(rootRef, iconRef, size);
+                    // 宿主（= 可见卡片）自己重新布局时重算一次：图标是 CENTER_VERTICAL 布局的，
+                    // 宿主长高/位移后我们写的偏移量就过期了，而这一轮不写就不会抖。
+                    hookAlignOnLayout(iconRef.getParent() instanceof View
+                            ? (View) iconRef.getParent() : rootRef, rootRef, iconRef, size);
+                    iconRef.bringToFront();
+                    // header 文本列：公式给的初值常与真机差 10~30px，再收敛一次
+                    // 从整行找（vivo 有的 header 挂在 contentView 之外），行的左缘就是列的基准
+                    View hdr = findViewByIdSuffixShown(rowView, "notification_header");
+                    if (hdr == null) {
+                        hdr = findViewByIdSuffixShown(rootRef, "notification_header");
+                    }
+                    if (hdr != null) {
+                        convergeHeaderColumn(rowView, hdr, 0);
+                    }
+                } catch (Throwable ignored) {
+                }
+            });
+            big = 1;
             if (title != null) {
                 title.setTextSize(TypedValue.COMPLEX_UNIT_SP, NotifyRowSpec.TITLE_TEXT_SP);
                 title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
             }
-            if (iosColumn) {
-                alignLightColumn(ctx, root, title != null ? title : body);
-            }
+            alignLightColumn(ctx, root, title != null ? title : body);
             // 图标/标题变化会改行高：必须通知列表重排，否则 StackScrollAlgorithm 仍按旧高度
             // 定位，表现为行重叠或大间隔
             contentView.requestLayout();
@@ -2654,12 +4209,20 @@ public final class NotifyRowFeature extends Feature {
                     }
                 }, 500);
             }
+            LIGHT_POLISHED.put(contentView, Boolean.TRUE);
+            // 故意不写 RESTYLED_ROWS：它是 iOS 时代"rejectExpand 拒绝用户展开"的开关，
+            // light 样式必须能正常展开（真机否决过一次同类回归）。
             Log.i(TAG, "notify_row: restyled light pkg=" + sbn.getPackageName()
-                    + " bigIcon=" + big + " geo=" + (iosColumn ? "ios-column" : "native")
+                    + " bigIcon=" + big + " geo=os5-column"
+                    // row= 让"同一次交互里同一行被 polish 几次"可数：抖动（用户报的第 1 个症状）
+                    // 的指纹就是重复 polish；没有行身份时 3 行同包日志分不清是 3 行还是 1 行×3。
+                    + " row=" + Integer.toHexString(System.identityHashCode(contentView))
                     + " titleLen=" + (titleText == null ? 0 : titleText.length())
                     + " bodyLen=" + (bodyText == null ? 0 : bodyText.length()));
+            return true;
         } catch (Throwable t) {
             Log.w(TAG, "notify_row: light polish failed", t);
+            return false;
         }
     }
 
@@ -2679,7 +4242,7 @@ public final class NotifyRowFeature extends Feature {
             applyLightPolish(contentView, root, headsup);
             return;
         }
-        clearLightBigIcon(root);
+        clearLightBigIcon(root, "not-light-style");
         sStackMode = isStackMode(ctx);
         sUngroupEnabled = !sStackMode;
         sVerifyEnabled = isVerify(ctx);
@@ -2709,10 +4272,6 @@ public final class NotifyRowFeature extends Feature {
         if (rowView == null) {
             RESTYLED.remove(contentView);
             return;
-        }
-        if (OsProfile.isA13OrLower()) {
-            // A13 没有系统侧的圆角传导，逐行补（与媒体落点无关，别用 qs_tile 判据）
-            applyRowRoundness(rowView, NotifyRowSpec.dp(rowView.getContext(), 20));
         }
         if (bool(rowView, "isSummaryWithChildren")) {
             if (sStackMode) {
@@ -2936,11 +4495,8 @@ public final class NotifyRowFeature extends Feature {
 
     /** light = 原生优化：保留 AOSP/vivo 原卡片与分组，只做 38dp 大图标 + 标题排版 */
     private static boolean isLightStyle(Context ctx) {
-        try {
-            return "light".equals(Prefs.option(ctx, "notify_row", "style", "ios"));
-        } catch (Throwable t) {
-            return false;
-        }
+        // iOS 卡样式已移除，所有版本统一走原生优化
+        return true;
     }
 
     private static boolean isStackMode(Context ctx) {
@@ -5324,6 +6880,102 @@ public final class NotifyRowFeature extends Feature {
         return false;
     }
 
+    /**
+     * 子行所在的组是否处于展开态。
+     * A13 的权威信号是 `NotificationChildrenContainer.mChildrenExpanded`；
+     * 摘要行的 `isExpanded()` 是"这条通知自身被点开（大图/长文）"，**不等于组展开**——
+     * 用它当第一判据会把"组展开但通知未展开"的子行全部判成收起（vivo 服务那组就是这个情况，
+     * 真机日志 `light.skip reason=group-collapsed`），而会话类通知自身常是展开态，于是"时有时无"。
+     * 所以顺序改成：容器字段 → isGroupExpanded → isExpanded，并打出实际走了哪条。
+     */
+    private static boolean groupExpanded(View row) {
+        try {
+            ViewParent p = row.getParent();
+            for (int i = 0; i < 8 && p instanceof View; i++) {
+                String name = p.getClass().getName();
+                if (name.contains("ChildrenContainer")
+                        || name.contains("NotificationChildContainer")) {
+                    try {
+                        boolean exp = XposedHelpers.getBooleanField(p, "mChildrenExpanded");
+                        logGroupSource(p, "mChildrenExpanded");
+                        return exp;
+                    } catch (Throwable ignored) {
+                    }
+                    Object summary = null;
+                    try {
+                        summary = XposedHelpers.callMethod(p, "getContainingNotification");
+                    } catch (Throwable ignored) {
+                    }
+                    if (summary instanceof View) {
+                        if (bool((View) summary, "isGroupExpanded")) {
+                            logGroupSource(p, "isGroupExpanded");
+                            return true;
+                        }
+                        if (bool((View) summary, "isExpanded")) {
+                            logGroupSource(p, "isExpanded");
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                p = ((View) p).getParent();
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    /** 组展开判据的取证串：容器类名 + 三个候选信号的真实值 */
+    private static String groupDbg(View row) {
+        StringBuilder sb = new StringBuilder();
+        try {
+            ViewParent p = row.getParent();
+            for (int i = 0; i < 8 && p instanceof View; i++) {
+                String name = p.getClass().getName();
+                if (name.contains("ChildrenContainer")
+                        || name.contains("NotificationChildContainer")) {
+                    sb.append("cont=").append(name.substring(name.lastIndexOf('.') + 1));
+                    try {
+                        sb.append(" mce=").append(XposedHelpers.getBooleanField(
+                                p, "mChildrenExpanded"));
+                    } catch (Throwable t) {
+                        sb.append(" mce=ERR");
+                    }
+                    Object sum = null;
+                    try {
+                        sum = XposedHelpers.callMethod(p, "getContainingNotification");
+                    } catch (Throwable ignored) {
+                    }
+                    if (sum instanceof View) {
+                        sb.append(" sumGexp=").append(bool((View) sum, "isGroupExpanded"))
+                          .append(" sumExp=").append(bool((View) sum, "isExpanded"))
+                          .append(" sumChildInGrp=").append(bool((View) sum, "isChildInGroup"));
+                    } else {
+                        sb.append(" sum=null");
+                    }
+                    return sb.toString();
+                }
+                p = ((View) p).getParent();
+            }
+            sb.append("no-container");
+        } catch (Throwable ignored) {
+        }
+        return sb.toString();
+    }
+
+    private static final java.util.Set<String> sGroupSrcLogged =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+    private static void logGroupSource(Object container, String src) {
+        if (!sVerifyEnabled) {
+            return;
+        }
+        if (sGroupSrcLogged.add(Integer.toHexString(System.identityHashCode(container))
+                + "->" + src)) {
+            Log.i(TAG, "notify_row.group.expanded src=" + src);
+        }
+    }
+
     private static ImageView iconOf(View root) {
         View v = root.findViewWithTag(TAG_ICON);
         if (!(v instanceof ImageView)) {
@@ -5391,6 +7043,11 @@ public final class NotifyRowFeature extends Feature {
         } catch (Throwable t) {
             return false;
         }
+    }
+
+    /** 供同包移植类即时读取，避免在 install 时快照到旧的开关值 */
+    static boolean verifyEnabled(Context ctx) {
+        return isVerify(ctx);
     }
 
     /** 机读校验：不依赖截图，直接断言视图的尺寸/坐标/可见性/字号/颜色/重叠 */

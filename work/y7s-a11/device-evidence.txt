@@ -1,0 +1,39 @@
+# Y7s A11 device-side read-only evidence  (captured 2026-11-02 16:33)
+## battery / power
+  AC powered: false
+  USB powered: true
+  board temp status: 0
+  low bat status: 0
+  reverse wl chg status: 0
+  status: 2
+  level: 21
+  mWakefulness=Asleep
+  mWakefulnessChanging=false
+  mStayOn=false
+  mStayOnWhilePluggedInSetting=0
+## safety settings applied
+screen_brightness=20
+screen_off_timeout=15000
+stay_on_while_plugged_in=0
+## keyguard / lock
+        mInputRestricted=true
+    mShowingDream=false mDreamingLockscreen=false    mStatusBar=Window{com.android.systemui:4e237b6 u0 StatusBar}    mExpandedPanel=Window{com.android.systemui:660b78c u0 NotificationShade} isKeyguardShowing=true
+lock_pattern_type=null
+lock_password_type=null
+## media session state (no music playing at capture time)
+    package=com.android.server.telecom
+    state=null
+  Sessions Stack - have 0 sessions:
+## notification: media / bbkmusic related
+      AppSettings: com.android.bbkmusic (10196) moreNotificationsEnabled=false
+        NotificationChannel{mId='com.android.bbkmusic.BBKMUSICSAVE', mName=播放推送, mDescription=hasDescription , mImportance=2, mBypassDnd=false, mLockscreenVisibility=-1000, mSound=null, mLights=false, mLightColor=-65536, mVibration=null, mUserLockedFields=0, mFgServiceShown=true, mVibrationEnabled=false, mShowBadge=true, mDeleted=false, mGroup='null', mAudioAttributes=AudioAttributes: usage=USAGE_NOTIFICATION content=CONTENT_TYPE_SONIFICATION flags=0x800 tags= bundle=null, mBlockableSystem=false, mAllowBubbles=-1, mImportanceLockedByOEM=false, mImportanceLockedDefaultApp=false, mOriginalImp=2, mParent=null, mConversationId=null, mDemoted=false, mImportantConvo=false, mEnableClassify=true}
+        NotificationChannel{mId='com.android.bbkmusic.BBKMUSIC', mName=播放控制, mDescription=hasDescription , mImportance=2, mBypassDnd=false, mLockscreenVisibility=-1000, mSound=content://settings/system/notification_sound, mLights=false, mLightColor=-65536, mVibration=null, mUserLockedFields=0, mFgServiceShown=false, mVibrationEnabled=true, mShowBadge=true, mDeleted=false, mGroup='null', mAudioAttributes=AudioAttributes: usage=USAGE_NOTIFICATION content=CONTENT_TYPE_SONIFICATION flags=0x800 tags= bundle=null, mBlockableSystem=false, mAllowBubbles=-1, mImportanceLockedByOEM=false, mImportanceLockedDefaultApp=false, mOriginalImp=2, mParent=null, mConversationId=null, mDemoted=false, mImportantConvo=false, mEnableClassify=true}
+      numWithMediaSession=0
+      numWithMediaSession=0
+      numWithMediaSession=0
+    post_frequency{user_id=0,pkg=com.android.bbkmusic,day=1,count=4,muted=0/3,demoted=1}
+    post_frequency{user_id=0,pkg=com.android.bbkmusic,day=4,count=2,muted=0/2,demoted=0}
+    post_frequency{user_id=0,pkg=com.android.bbkmusic,day=5,count=1,muted=0/1,demoted=0}
+    post_frequency{user_id=0,pkg=com.android.bbkmusic,day=6,count=22,muted=22/22,demoted=22}
+## bbkmusic resolved activity
+com.android.bbkmusic/.WidgetToTrackActivity

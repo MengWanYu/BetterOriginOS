@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """抽取模块源码里的 Xposed 目标 (类 -> 方法/字段)，对照 OS3 dexdump 核对可达性。
 用法: python os3-probe.py <src_root> <dexdump_file> <out_md>
+      src_root = module/src/com/betteroriginos（FILES 里的路径相对它；给成 module/src
+      会得到一份"涉及类 0"的空报告 —— 现在会直接红着退出）
 """
 import re, sys, collections, pathlib
 
@@ -10,6 +12,7 @@ DEXDUMP = pathlib.Path(sys.argv[2])
 OUT = pathlib.Path(sys.argv[3])
 
 FILES = ["feature/notify/NotifyRowFeature.java", "feature/media/MediaCardFeature.java",
+         "feature/notify/Os5Mirror.java",
          "feature/notify/IosNotificationRow.java", "hook/MainHook.java",
          "feature/notify/NotifyRowSpec.java", "core/FeatureManager.java",
          "feature/media/QsPlayerTile.java",
@@ -17,6 +20,13 @@ FILES = ["feature/notify/NotifyRowFeature.java", "feature/media/MediaCardFeature
          "feature/fileman/FileManagerRenameFeature.java"]
 
 WRAP_PREFIX = "com.android.systemui.statusbar.notification.row.wrapper."
+
+# 在 A13 上本就**不该存在**的类：模块用 findClass 做能力探测（有就让位、没有才补挂），
+# 不是硬依赖，所以报告里不能算成"hook 目标缺失"。
+INTENTIONAL_ABSENT = {
+    "com.vivo.systemui.statusbar.ui.NotificationClearAllImageView":
+        "OS5 原生浮动清除按钮（A15 三个 dex 命中 6 / A13 全 0）；命中时模块整段不补挂，避免两枚重叠",
+}
 
 def strip_comments(t):
     t = re.sub(r'/\*.*?\*/', ' ', t, flags=re.S)
@@ -81,9 +91,11 @@ def load_dex(path, wanted):
 def main():
     per_class = collections.defaultdict(set)
     all_fields, all_calls = set(), set()
+    missing_files = []
     for rel in FILES:
         f = SRC / rel
         if not f.exists():
+            missing_files.append(str(f))
             continue
         pc, flds, cls_ = scan(f)
         for k, v in pc.items():
@@ -91,12 +103,30 @@ def main():
         all_fields |= flds
         all_calls |= cls_
 
+    # **检查器瞎了比红更糟**：SRC 给错（或 FILES 里的文件被改名）时，上面那个 continue
+    # 会静默把整份报告缩成"涉及类 0 / 缺失 0"的全绿结论 —— 本轮真的产出过这样一份空报告。
+    # 所以扫描范围一旦不完整就必须红着退出，而不是写一份好看的 md。
+    if missing_files or not per_class:
+        print("PROBE ABORT: 扫描范围不完整或为空，报告不可信")
+        for mf in missing_files:
+            print("   缺失源文件:", mf)
+        if not per_class:
+            print("   涉及类 0 —— SRC 应该是 module/src/com/betteroriginos（ FILES 是相对它的路径）")
+        return 2
+    head = DEXDUMP.read_text(encoding="utf-8", errors="replace")[:200000]
+    if "Class descriptor" not in head:
+        print("PROBE ABORT: dexdump 文件里没有 `Class descriptor`（不是 -f 全量转储？）:", DEXDUMP)
+        return 2
+
     have = load_dex(DEXDUMP, set(per_class))
     lines = ["# OS3 hook 目标可达性核对（源码 -> OS3 dexdump）", ""]
     miss_cls = miss_meth = 0
     lines.append("## 缺失类")
     for cls in sorted(per_class):
         if cls not in have:
+            if cls in INTENTIONAL_ABSENT:
+                lines.append(f"- ℹ️ `{cls}` 按设计缺失：{INTENTIONAL_ABSENT[cls]}")
+                continue
             miss_cls += 1
             lines.append(f"- ❌ `{cls}` 需要方法: {', '.join(sorted(per_class[cls])) or '（仅引用）'}")
     lines.append("")
@@ -135,4 +165,4 @@ def main():
     OUT.write_text("\n".join(lines), encoding="utf-8")
     print(f"classes={len(per_class)} missing_class={miss_cls} missing_method={miss_meth} -> {OUT}")
 
-main()
+sys.exit(main())

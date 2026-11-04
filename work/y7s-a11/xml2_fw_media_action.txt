@@ -1,0 +1,13 @@
+N: android=http://schemas.android.com/apk/res/android (line=18)
+  E: ImageButton (line=18)
+    A: http://schemas.android.com/apk/res/android:gravity(0x010100af)=0x00000011
+    A: http://schemas.android.com/apk/res/android:background(0x010100d4)=@0x01080618
+    A: http://schemas.android.com/apk/res/android:paddingTop(0x010100d7)=8.000000dp
+    A: http://schemas.android.com/apk/res/android:paddingBottom(0x010100d9)=8.000000dp
+    A: http://schemas.android.com/apk/res/android:visibility(0x010100dc)=2
+    A: http://schemas.android.com/apk/res/android:layout_width(0x010100f4)=@0x010501a5
+    A: http://schemas.android.com/apk/res/android:layout_height(0x010100f5)=@0x010501a5
+    A: http://schemas.android.com/apk/res/android:paddingStart(0x010103b3)=8.000000dp
+    A: http://schemas.android.com/apk/res/android:paddingEnd(0x010103b4)=8.000000dp
+    A: http://schemas.android.com/apk/res/android:layout_marginEnd(0x010103b6)=2.000000dp
+    A: style=@0x0103025b

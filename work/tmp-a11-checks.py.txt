@@ -1,0 +1,153 @@
+    if media and not m["a11spec"]:
+        fails.append("a11spec: 没有 A11 卡规格见证日志（style 不是 a11 或卡片没建起来）")
+    dens_spec = []
+    for mo in m["a11spec"]:
+        dens, font = float(mo.group(9)), float(mo.group(10))
+        dens_spec.append((dens, font))
+        bad = []
+        for idx, want_dp, name in ((1, A11_BTN_PAD_DP, "按钮内缩"),
+                                   (2, A11_BTN_END_DP, "按钮右外边距"),
+                                   (3, A11_BTN_DP, "btn"),
+                                   (4, A11_BTN_DP, "btnCenter"),
+                                   (5, A11_SRC_DP, "src")):
+            want = want_dp * dens
+            if abs(float(mo.group(idx)) - want) > 1.5:
+                bad.append("%s 期望 %ddp=%.1fpx 实得 %s" % (name, want_dp, want, mo.group(idx)))
+        if int(mo.group(8)) != A11_TRACK_DP:
+            bad.append("trackDp 期望 %d 实得 %s" % (A11_TRACK_DP, mo.group(8)))
+        # A11 的通知卡还是 9-patch 那一代：没有 notification_corner_radius，圆角应为 0。
+        # hostCorner 只是对照值（宿主主题圆角），断言绝不能读它——那就成了"跟着宿主美化"。
+        if int(mo.group(11)) != A11_ART_RADIUS_DP:
+            bad.append("radius 期望 %d（A11 通知卡无圆角）实得 %s，宿主对照 %s"
+                       % (A11_ART_RADIUS_DP, mo.group(11), mo.group(12)))
+        if not mo.group(12):
+            bad.append("spec 缺 hostCorner 对照值：没有它就无法证明我们没跟宿主主题")
+        if bad:
+            fails.append("a11spec: " + "; ".join(bad))
+        else:
+            ok("a11spec", "btn=%s/%s pad=%s end=%s src=%s radius=%s（宿主对照 %s）"
+               % (mo.group(3), mo.group(4), mo.group(1), mo.group(2), mo.group(5),
+                  mo.group(11), mo.group(12)))
+
+    # 封面几何 + 排版：A11 只有一套（MediaStyle 模板），不存在"展开态另一套 16/14/14sp"
+    if media and m["a11spec"] and not m["art"]:
+        fails.append("art: 有 spec 日志却没有 a11 art state 见证（几何/排版那半段没跑）")
+    for mo in m["art"]:
+        state = mo.group(1).lower()
+        size, content_h = int(mo.group(2)), int(mo.group(3))
+        scale, clip = mo.group(4).lower(), mo.group(5).lower()
+        title_px, sub_px, medium = int(mo.group(6)), int(mo.group(7)), int(mo.group(8))
+        if not dens_spec:
+            break
+        dens, font = dens_spec[0]
+        bad = []
+        if content_h <= 0:
+            bad.append("contentH=%d：内容块还没量到，封面尺寸是猜的" % content_h)
+        elif size != content_h:
+            bad.append("封面不是正方形：size=%d contentH=%d（A11 是**边长=内容块高**）"
+                       % (size, content_h))
+        if clip != "false":
+            bad.append("clip=%s：A11 的 right_icon 没有裁剪/圆角" % mo.group(5))
+        if scale != "center_inside":
+            bad.append("scaleType=%s，A11 布局里写的是 centerInside" % mo.group(4))
+        exp_title = A11_TITLE_SP * dens * font
+        # 副文 = notification_subtext_size = 12**dp**（资源表里单位就是 dp，不跟 fontScale）
+        exp_sub = A11_SUBTEXT_DP * dens
+        if abs(title_px - exp_title) > 1.5:
+            bad.append("titlePx 期望 %.1f（14sp 跟 fontScale）实得 %d" % (exp_title, title_px))
+        if abs(sub_px - exp_sub) > 1.5:
+            bad.append("subtextPx 期望 %.1f（12dp，**不**跟 fontScale=%s）实得 %d"
+                       % (exp_sub, font, sub_px))
+        if medium != 1:
+            bad.append("标题不是 sans-serif-medium（A11 模板 line1 的字族是被强调那一族）")
+        if bad:
+            fails.append("art(%s): " % state + "; ".join(bad))
+        else:
+            ok("art", "%s size=%d=contentH clip=%s title=%dpx subtext=%dpx medium=%d"
+               % (state, size, mo.group(5), title_px, sub_px, medium))
+
+    if media and m["art"]:
+        seen_states = set(mo.group(1).lower() for mo in m["art"])
+        for need in ("expanded", "collapsed"):
+            if need not in seen_states:
+                fails.append("art: 本轮没有 %s 态见证 —— 该态排版在真机上未验证"
+                             "（门禁需要展开一次卡片）" % need)
+
+    if media and not m["a11pal"]:
+        fails.append("a11: 没有 A11 取色日志（媒体卡未绑定或 style 不是 a11）")
+    card_bgs = set()
+    for mo in m["a11pal"]:
+        state = mo.group(1).lower()
+        bg = int(mo.group(2), 16)
+        primary = int(mo.group(4), 16)
+        secondary = int(mo.group(5), 16)
+        colorized, session = mo.group(6), mo.group(7)
+        contrast = float(mo.group(8))
+        artwork = mo.group(9).lower() == "true"
+        aw, ah = int(mo.group(10)), int(mo.group(11))
+        gbg, gfg = int(mo.group(12)), int(mo.group(13))
+        bad = []
+        card_bgs.add(mo.group(2))
+        # A11 isColorizedMedia：MediaStyle + 有会话 ⇒ 默认着色（app 显式写
+        # android.colorized=false 才算关）。所以 session=1 而 colorized=0 是矛盾。
+        if session == "1" and colorized != "1":
+            bad.append("session=1 但 colorized=0，与 A11 的 isColorizedMedia 相反")
+        if colorized == "0" and (bg & 0xFFFFFF) not in (0xFFFFFF, 0x000000):
+            bad.append("未着色时底色应为 notification_material_background_color"
+                       "（#ffffffff / 夜 black），实得 %s" % mo.group(2))
+        side = _which_side(bg)
+        want_p = A11_PRIMARY[side]
+        want_s = A11_SECONDARY[side]
+        if (primary & 0xFFFFFF) != (want_p & 0xFFFFFF):
+            bad.append("primary RGB 应为 %06X（底色亮度决定用深字/浅字那一支），实得 %s"
+                       % (want_p & 0xFFFFFF, mo.group(4)))
+        if ((primary >> 24) & 0xFF) != ((want_p >> 24) & 0xFF):
+            bad.append("primary alpha 被改动：A11 的 primary 本就是不透明，够用就不该动")
+        if (secondary & 0xFFFFFF) != (want_s & 0xFFFFFF):
+            bad.append("secondary RGB 应为 %06X，实得 %s" % (want_s & 0xFFFFFF, mo.group(5)))
+        if ((secondary >> 24) & 0xFF) < ((want_s >> 24) & 0xFF):
+            bad.append("secondary 被调淡（alpha %d < A11 起点 %d）："
+                       "findAlphaToMeetContrast 只会往上加"
+                       % ((secondary >> 24) & 0xFF, (want_s >> 24) & 0xFF))
+        # 对比度必须就是"日志里那两色"的真实值：防止见证自己报个好数
+        real_p = _ctr(primary, bg | 0xFF000000)
+        if abs(real_p - contrast) > 0.06:
+            bad.append("contrast 字段=%.2f 与实算 %.2f 不一致（见证自说自话）"
+                       % (contrast, real_p))
+        for name, val in (("primary", primary), ("secondary", secondary)):
+            c = _ctr(val, bg | 0xFF000000)
+            if c < 4.44:
+                bad.append("%s 对底色只有 %.2f:1，A11 要求正文 ≥4.5" % (name, c))
+        want_bg = a11_grid(aw, ah, 0) if artwork else 0
+        want_fg = a11_grid(aw, ah, 1) if artwork else 0
+        if gbg != want_bg or gfg != want_fg:
+            bad.append("取色网格 art=%dx%d 期望 bg=%d fg=%d 实得 bg=%d fg=%d"
+                       "（bg=左半幅、fg=右 60%%，且先缩整图再换算 region）"
+                       % (aw, ah, want_bg, want_fg, gbg, gfg))
+        if bad:
+            fails.append("a11(%s): " % state + "; ".join(bad))
+        else:
+            ok("a11", "%s bg=%%%s primary=%%%s secondary=%%%s contrast=%.2f grid=%d/%d"
+               % (state, mo.group(2), mo.group(4), mo.group(5), contrast, gbg, gfg))
+
+    # 封面浮雕：边长 = 原图短边（§4a 居中裁方），用的底色必须是本屏卡片那一支底色
+    if media and m["a11pal"] and not m["relief"]:
+        fails.append("relief: 有取色日志却没有 a11 art relief 见证（封面后处理那半段没跑）")
+    for mo in m["relief"]:
+        sw, sh = int(mo.group(1)), int(mo.group(2))
+        rw, rh = int(mo.group(3)), int(mo.group(4))
+        bad = []
+        if sw != sh:
+            bad.append("浮雕输出不是正方形 %dx%d" % (sw, sh))
+        if rw and rh and sw != min(rw, rh):
+            bad.append("浮雕边长 %d 不等于原图短边 %d（A11 是居中裁方）" % (sw, min(rw, rh)))
+        if card_bgs and mo.group(5) not in card_bgs:
+            bad.append("浮雕用的底色 %s 不在本屏卡片底色里（%s）"
+                       % (mo.group(5), ",".join(sorted(card_bgs))))
+        if mo.group(6) not in ("0", "1"):
+            bad.append("rtl 见证值异常：%s" % mo.group(6))
+        if bad:
+            fails.append("relief: " + "; ".join(bad))
+        else:
+            ok("relief", "side=%d src=%dx%d color=%%%s rtl=%s"
+               % (sw, rw, rh, mo.group(5), mo.group(6)))

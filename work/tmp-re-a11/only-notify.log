@@ -1,0 +1,4 @@
+11-02 23:10:01 1234 1234 I BetterOriginOS: notify_row: os5_mirror: radius level=1 px=54.0 cls=ExpandableNotificationRow
+11-02 23:10:01 1234 1234 I BetterOriginOS: notify_row: os5_mirror: g2 path l=0 t=64 r=1032 b=296 top=54.0 bottom=54.0
+11-02 23:10:01 1234 1234 I BetterOriginOS: notify_row: os5_mirror: shelf gap=21 topRoundness=1.0
+11-02 23:10:02 1234 1234 I BetterOriginOS: notify_row: os5_mirror: clear-all attached size=138 marginBottom=120 nav=false

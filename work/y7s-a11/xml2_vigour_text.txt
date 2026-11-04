@@ -1,0 +1,13 @@
+N: android=http://schemas.android.com/apk/res/android (line=17)
+  E: com.android.internal.widget.ImageFloatingTextView (line=17)
+    A: http://schemas.android.com/apk/res/android:textAppearance(0x01010034)=@0x030f00ac
+    A: http://schemas.android.com/apk/res/android:ellipsize(0x010100ab)=3
+    A: http://schemas.android.com/apk/res/android:gravity(0x010100af)=0x00000030
+    A: http://schemas.android.com/apk/res/android:layout_gravity(0x010100b3)=0x00000030
+    A: http://schemas.android.com/apk/res/android:id(0x010100d0)=@0x010204be
+    A: http://schemas.android.com/apk/res/android:fadingEdge(0x010100df)=0x00001000
+    A: http://schemas.android.com/apk/res/android:layout_width(0x010100f4)=-1
+    A: http://schemas.android.com/apk/res/android:layout_height(0x010100f5)=-2
+    A: http://schemas.android.com/apk/res/android:layout_marginTop(0x010100f8)=@0x030c025b
+    A: http://schemas.android.com/apk/res/android:singleLine(0x0101015d)=true
+    A: http://schemas.android.com/apk/res/android:textDirection(0x010103b0)=5

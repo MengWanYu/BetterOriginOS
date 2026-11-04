@@ -77,6 +77,27 @@ import de.robv.android.xposed.XposedHelpers;
 public final class MediaCardFeature extends Feature {
     private static final String TAG = "BetterOriginOS";
     private static final Map<View, MediaCard> CARDS = new WeakHashMap<>();
+
+    /** 不可拖动时吞掉触摸。A11 本体靠 `setEnabled(false)`；这里两者一起做，避免手势穿到下层。 */
+    private static final android.view.View.OnTouchListener CONSUME_TOUCH = (v, event) -> true;
+
+    /**
+     * A11 标题的字族实例。两态共用同一个对象，`titleMedium=` 见证的同一性比较才成立；
+     * 每次 Typeface.create 可能返回不同实例，见证就会假红（内部版 android.jar 没有
+     * Typeface.getFamily()，只能按实例身份比）。
+     * 设备真值（LOG-1103 §20-1）：line1 = sans-serif-medium 族**并且**布局又叠了 textStyle=BOLD，
+     * 所以生效的是 medium+BOLD 合成那一个实例，同样只创建一次。
+     */
+    private static android.graphics.Typeface sA11MediumBold;
+
+    private static android.graphics.Typeface a11MediumBoldTitle() {
+        if (sA11MediumBold == null) {
+            sA11MediumBold = android.graphics.Typeface.create(
+                    "sans-serif-medium", android.graphics.Typeface.BOLD);
+        }
+        return sA11MediumBold;
+    }
+
     private static final String WIDGET_PKG = "com.vivo.musicwidgetmix";
     private static final String PREVIEW_REQ_KEY = "betteroriginos_preview_req";
     private static final String PREVIEW_DONE_KEY = "betteroriginos_preview_done";
@@ -256,9 +277,11 @@ public final class MediaCardFeature extends Feature {
                 R.string.option_style_title,
                 R.string.option_style_summary,
                 "os5",
-                new String[]{"os5", "material"},
-                new int[]{R.string.style_os5_title, R.string.style_m3_title},
-                new int[]{R.drawable.preview_os5, R.drawable.preview_m3}));
+                new String[]{"os5", "material", "a11"},
+                new int[]{R.string.style_os5_title, R.string.style_m3_title,
+                        R.string.style_a11_title},
+                new int[]{R.drawable.preview_os5, R.drawable.preview_m3,
+                        R.drawable.preview_a11}));
         list.add(FeatureOption.toggle("qs_seek", R.string.option_qs_seek_title,
                 R.string.option_qs_seek_summary, false));
         return list;
@@ -319,7 +342,10 @@ public final class MediaCardFeature extends Feature {
                                     + " tv=" + t);
                         }
                         try {
-                            restyle((View) child);
+                            // A11 的收起态是"着色行"、展开态才是"深色卡"，两条取色链不同，
+                            // 所以必须记住这次是哪个 setter 触发的
+                            String method = param.method == null ? "" : param.method.getName();
+                            restyle((View) child, method.contains("Expanded"));
                         } catch (Throwable t) {
                             Log.e(TAG, "restyle failed", t);
                         }
@@ -328,15 +354,87 @@ public final class MediaCardFeature extends Feature {
             };
             int n1 = XposedBridge.hookAllMethods(c, "setExpandedChild", hook).size();
             int n2 = XposedBridge.hookAllMethods(c, "setContractedChild", hook).size();
+            // 展开/收起翻转时重算已有的卡。A13 真机读数说明绑定路径接不到展开：
+            // `expandNotification()` 之后 `isExpanded` 已翻成 true，
+            // 但 `setExpandedChild` 没有再跑 ⇒ `a11 art state=expanded` 见证 0 条，
+            // 而 A11 的收起态是"着色行"、展开态是"深色卡"，两态排版与取色链都不同。
+            // 信号用系统自己的 `ExpandableNotificationRow.onExpansionChanged(userChanged, 旧状态)`
+            // （OS3 jadx:740）—— **新状态不在参数里**，要回读 `isExpanded()`。
+            int n3 = installExpansionHook(cl);
             installSweepHook(cl);
             OsProfile.report();
-            Log.i(TAG, "media card feature installed expandedHooks=" + n1 + " contractedHooks=" + n2);
+            Log.i(TAG, "media card feature installed expandedHooks=" + n1
+                    + " contractedHooks=" + n2 + " expansionHooks=" + n3);
         } catch (Throwable t) {
             Log.e(TAG, "media card feature install failed", t);
         }
     }
 
     private static int sBindCount;
+    private static int sExpansionRestyles;
+
+    /** 挂 `ExpandableNotificationRow.onExpansionChanged`；返回命中方法数。 */
+    private int installExpansionHook(ClassLoader cl) {
+        try {
+            Class<?> rowCls = XposedHelpers.findClass(
+                    "com.android.systemui.statusbar.notification.row.ExpandableNotificationRow", cl);
+            return XposedBridge.hookAllMethods(rowCls, "onExpansionChanged", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (!(param.thisObject instanceof View)) {
+                        return;
+                    }
+                    View row = (View) param.thisObject;
+                    boolean now;
+                    try {
+                        now = Boolean.TRUE.equals(XposedHelpers.callMethod(row, "isExpanded"));
+                    } catch (Throwable t) {
+                        return;
+                    }
+                    try {
+                        restyleOnExpansion(row, now);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "media expansion restyle failed", t);
+                    }
+                }
+            }).size();
+        } catch (Throwable t) {
+            Log.i(TAG, "media expansion hook class missing: " + t.getMessage());
+            return 0;
+        }
+    }
+
+    /** 把挂在这行里的卡切到新状态（setState 自己会跳过非 a11 与状态未变的卡）。 */
+    private void restyleOnExpansion(View row, boolean expanded) {
+        java.util.List<MediaCard> hits = new java.util.ArrayList<>();
+        synchronized (CARDS) {
+            for (java.util.Map.Entry<View, MediaCard> e : CARDS.entrySet()) {
+                View root = e.getKey();
+                if (root != null && (root == row || isDescendantOf(root, row))) {
+                    hits.add(e.getValue());
+                }
+            }
+        }
+        for (MediaCard c : hits) {
+            c.setState(Boolean.valueOf(expanded));
+        }
+        // 见证：展开这条路真的走到了卡片，而不是只把调用发出去了
+        if (!hits.isEmpty() && ++sExpansionRestyles <= 6) {
+            Log.i(TAG, "media expansion restyle cards=" + hits.size()
+                    + " expanded=" + (expanded ? 1 : 0));
+        }
+    }
+
+    private static boolean isDescendantOf(View v, View ancestor) {
+        for (View p = v.getParent() instanceof View ? (View) v.getParent() : null;
+                p != null; p = p.getParent() instanceof View ? (View) p.getParent() : null) {
+            if (p == ancestor) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static long sLastSweepAt;
     private static boolean sTreeDumped;
 
@@ -396,7 +494,7 @@ public final class MediaCardFeature extends Feature {
                                 continue;
                             }
                             Log.i(TAG, "media sweep attach cls=" + v.getClass().getName());
-                            restyle(v);
+                            restyle(v, null);
                         }
                     } catch (Throwable t) {
                         Log.w(TAG, "media sweep failed", t);
@@ -462,7 +560,8 @@ public final class MediaCardFeature extends Feature {
         }
     }
 
-    private void restyle(View root) {
+    /** @param expanded 收起态/展开态（A11 两条取色链不同）；null 表示沿用已有状态 */
+    private void restyle(View root, Boolean expanded) {
         if (!(root instanceof ViewGroup)) {
             return;
         }
@@ -496,6 +595,7 @@ public final class MediaCardFeature extends Feature {
         synchronized (CARDS) {
             MediaCard existing = CARDS.get(root);
             if (existing != null) {
+                existing.setState(expanded);
                 existing.refreshColors(true);
                 return;
             }
@@ -513,7 +613,7 @@ public final class MediaCardFeature extends Feature {
         Log.i(TAG, "restyling style=" + style + " " + root.getClass().getName()
                 + " title=" + title.getText() + " actions=" + actions.getChildCount());
         MediaCard card = MediaCard.build(ctx, root, actions, title, artist, art, sourceIcon,
-                headerId, style);
+                headerId, style, !Boolean.FALSE.equals(expanded));
         synchronized (CARDS) {
             CARDS.put(root, card);
         }
@@ -562,7 +662,8 @@ public final class MediaCardFeature extends Feature {
                                 int sep = req.indexOf(':');
                                 if (sep > 0) {
                                     String requested = req.substring(sep + 1);
-                                    if ("os5".equals(requested) || "material".equals(requested)) {
+                                    if ("os5".equals(requested) || "material".equals(requested)
+                                            || "a11".equals(requested)) {
                                         style = requested;
                                     }
                                 }
@@ -573,9 +674,75 @@ public final class MediaCardFeature extends Feature {
                         }
                     });
             Log.i(TAG, "preview observer registered");
+            // 调试用：门禁必须看到**展开态**的 A11 卡（16/14/14sp 那一套），
+            // 而收起态只是它的默认外观。系统自己的展开入口是
+            // `ExpandableNotificationRow.expandNotification()`（A13 jadx:1327，
+            // 内部就是 `mExpandClickListener.onClick(this)`，与用户点一下等价），
+            // 走它比盲 tap 可靠 —— tap 在这两台机上都会把播放器点开或把面板甩掉。
+            sysui.getContentResolver().registerContentObserver(
+                    Settings.Global.getUriFor(EXPAND_DEBUG_KEY), false,
+                    new ContentObserver(new Handler(Looper.getMainLooper())) {
+                        @Override
+                        public void onChange(boolean selfChange) {
+                            try {
+                                if (!"1".equals(Settings.Global.getString(
+                                        sysui.getContentResolver(), EXPAND_DEBUG_KEY))) {
+                                    return;
+                                }
+                                debugExpandMediaRow();
+                            } catch (Throwable t) {
+                                Log.w(TAG, "media_card: debug expand failed", t);
+                            }
+                        }
+                    });
         } catch (Throwable t) {
             Log.e(TAG, "preview observer register failed", t);
         }
+    }
+
+    private static final String EXPAND_DEBUG_KEY = "betteroriginos_notify_expand_test";
+
+    /** 展开挂着媒体卡的行；只为产出展开态见证，不参与任何产品行为。 */
+    private static void debugExpandMediaRow() {
+        java.util.List<View> keys;
+        synchronized (CARDS) {
+            keys = new java.util.ArrayList<>(CARDS.keySet());
+        }
+        int expanded = 0, missed = 0;
+        StringBuilder after = new StringBuilder();
+        // **每一张卡都展开**，不是"挑第一张就 return"：CARDS 是 WeakHashMap，
+        // 迭代顺序不定，两台卡并存时（真机实测 cards=2）早退会随机命中非媒体行，
+        // 现象是同一份门禁两次跑出不同的结果。
+        for (View root : keys) {
+            View row = root;
+            while (row != null && !row.getClass().getName()
+                    .contains("ExpandableNotificationRow")) {
+                row = row.getParent() instanceof View ? (View) row.getParent() : null;
+            }
+            if (row == null) {
+                missed++;
+                continue;
+            }
+            try {
+                XposedHelpers.callMethod(row, "expandNotification");
+                // 回读系统的判断结果：`expanded=2` 只代表"调用发出去了"，
+                // 真机上出现过调用后行仍是收起态（于是没有展开态见证）。
+                // 不回读就只能猜是调用没生效还是绑定没重跑。
+                Object now;
+                try {
+                    now = XposedHelpers.callMethod(row, "isExpanded");
+                } catch (Throwable t) {
+                    now = "?";
+                }
+                after.append(' ').append(now);
+                expanded++;
+            } catch (Throwable t) {
+                Log.w(TAG, "media_card: debug expand call failed", t);
+            }
+        }
+        Log.i(TAG, "media_card: debug expand cards=" + keys.size()
+                + " called=" + expanded + " isExpandedAfter=" + after.toString().trim()
+                + " noRow=" + missed);
     }
 
     /** 离屏合成模板 + 复用产线 MediaCard.build 渲染指定样式，输出真实观感 PNG */
@@ -601,7 +768,7 @@ public final class MediaCardFeature extends Feature {
             if (artDrawable != null) {
                 art.setImageDrawable(artDrawable);
             }
-            MediaCard.build(ctx, root, actions, title, text, art, null, 0, style);
+            MediaCard.build(ctx, root, actions, title, text, art, null, 0, style, true);
 
             int w = ctx.getResources().getDisplayMetrics().widthPixels - dp(ctx, 40);
             int wSpec = View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY);
@@ -724,6 +891,50 @@ public final class MediaCardFeature extends Feature {
         return Math.round(v * ctx.getResources().getDisplayMetrics().density);
     }
 
+    /**
+     * A11 通知卡**没有圆角**：framework-res 与 SystemUI 的资源表里
+     * `dimen/notification_corner_radius` 命中数都是 0（A11 的行背景还是 9-patch，
+     * 圆角是 A12 才引进的），卡内封面的 right_icon 也没有任何裁剪属性（LOG-1103 §12-2）。
+     * 以前这里返回 2dp，那是 QS 播放器 Theme.DeviceDefault.dialogCornerRadius
+     * （Y7s fw_res 0x010500a6=2.000000dp）串进来的；宿主值仍打进日志做对照，
+     * 断言绝不能读它——照宿主取值等于把 A11 卡"顺手美化"掉。
+     */
+    private static int a11ArtRadiusPx(Context ctx) {
+        return dp(ctx, A11NotifSpec.ART_RADIUS_DP);
+    }
+
+    /**
+     * 见证日志用的封面尺寸与取色网格。网格必须与 A11 一致（先缩整图再换算 region），
+     * 否则量化直方图的像素基数就不同，胜出的 swatch 可能整个换人。
+     * region 定义复用 A11Palette.collapsedRegions，避免日志和实际取色分叉。
+     */
+    private static String artSize(Bitmap art) {
+        return art == null ? "0x0" : art.getWidth() + "x" + art.getHeight();
+    }
+
+    private static int artGrid(Bitmap art, int regionIndex) {
+        if (art == null) {
+            return 0;
+        }
+        return A11Palette.gridPixels(art.getWidth(), art.getHeight(), regionIndex);
+    }
+
+    /** 宿主主题自己的 dialogCornerRadius，仅用于日志对照 */
+    private static int hostDialogCornerRadiusPx(Context ctx) {
+        try {
+            android.util.TypedValue tv = new android.util.TypedValue();
+            if (ctx.getTheme() != null
+                    && ctx.getTheme().resolveAttribute(android.R.attr.dialogCornerRadius, tv,
+                            true)
+                    && tv.type == android.util.TypedValue.TYPE_DIMENSION) {
+                return Math.round(
+                        tv.getDimension(ctx.getResources().getDisplayMetrics()));
+            }
+        } catch (Throwable ignored) {
+        }
+        return -1;
+    }
+
     private static boolean isNight(Context ctx) {
         return (ctx.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
                 == Configuration.UI_MODE_NIGHT_YES;
@@ -731,7 +942,8 @@ public final class MediaCardFeature extends Feature {
 
     static final class MediaCard {
         final View root;
-        final LinearLayout card;
+        /** a11 时是 FrameLayout（A11 的根），其它样式是竖向 LinearLayout（LOG-1103 §20-3） */
+        final ViewGroup card;
         final ImageView art;
         final ImageView artView;
         final SeekBar bar;
@@ -745,26 +957,90 @@ public final class MediaCardFeature extends Feature {
         final ImageButton playBtn;
         final ImageView sourceView;
         final String style;
+        /** A11 收起态=着色行（36dp right_icon、Palette 明暗可翻转）；展开态=深色原生卡 */
+        boolean expanded = true;
         final Handler handler = new Handler(Looper.getMainLooper());
         MediaController controller;
         boolean dragging;
         boolean tickerRunning;
         boolean canSeek;
         boolean lastNoDur;
-        int lastArtHash;
+        /**
+         * 取色去重键。必须带上 expanded 与 night：
+         * a11 两链取色本就不同，样式也可能在卡片存活期间被切换。
+         */
+        String lastArtKey = "";
         String lastTrackKey = "";
         int lastDrawableHash;
+        /** a11 卡片的实际底色，syncArt 用它跑 A11 的"浮雕+渐变"封面后处理 */
+        int a11CardBg;
+        /** 上一次做浮雕用的底色。底色换人时右边的淡出就接不上卡片，必须重做（见 syncArt）。 */
+        int a11ReliefBg = Integer.MIN_VALUE;
+        /** 唯一的原始封面（未经 ImageGradientColorizer 处理的那份），只做一次方形化取图 */
+        Bitmap a11RawArt;
+        /** 最近一次 artSource() 实际取到的那一份来自哪里（largeIcon/largeIconDrawn/metadata/none） */
+        String artFrom = "none";
+        /**
+         * a11 的竖向内容列（对应 A11 的 notification_media_content）。
+         * 封面正方形的边长取**它**的测量高度，不是整张 card 的高 —— A11 的封面
+         * 与内容列同顶同高，card 根是 FrameLayout（LOG-1103 §2/§15-9）。
+         */
+        ViewGroup a11Column;
+        /** a11 卡顶那一行的 app 名（§20-1：12sp、副文同色），随取色链一起换色 */
+        TextView a11HeaderName;
+        /** a11 的进度条容器（条 + 下方两枚时间），显隐按 A11 的三判据切（§15-7） */
+        ViewGroup a11SeekWrap;
+        long lastDurationMs;
+        /**
+         * 建卡那一拍的规格见证原文。logd 有 **每进程 250 行/秒** 的限流，SystemUI 启动/转屏
+         * 那一秒 vivo 自己就刷几百行，我们夹在中间的 restyling + a11 card spec 会被整段丢掉
+         * （11-04 早上真机复现：media bind 与 preview observer registered 都在，中间两行没了）。
+         * 所以这条见证按低频（>4s）在几何刷新里补发一次，门禁不再赌"恰好没被限流"。
+         */
+        String a11SpecWitness;
+        long a11SpecWitnessAt;
+
+        /**
+         * A11 进度条的显隐判据，逐条来自 `NotificationMediaTemplateViewWrapper.resolveViews`
+         * （LOG-1103 §15-7）：没有会话 / 时长&lt;=0 / **收起态**（
+         * `compact_media_notification_seekbar_enabled` 默认 false）⇒ 整个 seek 容器 GONE。
+         * 注意"不可拖"不是藏条，而是滑块透明 + setEnabled(false)，那条走 seek 见证。
+         */
+        void applyA11SeekVisibility() {
+            if (a11SeekWrap == null) {
+                return;
+            }
+            boolean show = controller != null && lastDurationMs > 0 && expanded;
+            int want = show ? View.VISIBLE : View.GONE;
+            if (a11SeekWrap.getVisibility() == want) {
+                return;
+            }
+            a11SeekWrap.setVisibility(want);
+            Log.i(TAG, "a11 seek vis=" + want + " expanded=" + (expanded ? 1 : 0)
+                    + " session=" + (controller != null ? 1 : 0) + " dur=" + lastDurationMs);
+            // 容器进出会改变内容列高度 ⇒ 封面正方形要跟着重量一次
+            card.post(() -> {
+                try {
+                    applyA11ArtGeometry();
+                } catch (Throwable ignored) {
+                }
+            });
+        }
         View rowBgView;
         Drawable curBg;
 
         final Runnable ticker = new Runnable() {
             @Override
             public void run() {
+                // A11 这个定时器只管时间/进度（`PROGRESS_UPDATE_INTERVAL_MS` = 1000ms）。
+                // 以前这里是 300ms 且顺带 syncArt()+refreshColors()，三个后果：
+                // ①窗口永远不空闲 ⇒ `uiautomator dump` 报 "could not get idle state"，取证整轮作废；
+                // ②切歌时反复拿"会话里那份还没换过来的 metadata"重取色，卡片底色就停在上一首；
+                // ③每秒三次无谓重画。封面与取色改回**事件驱动**（bind / onMetadataChanged）。
                 updateProgress();
-                syncArt();
-                refreshColors(true);
+                watchArtArrival();
                 if (tickerRunning) {
-                    handler.postDelayed(this, 300);
+                    handler.postDelayed(this, A11NotifSpec.PROGRESS_UPDATE_INTERVAL_MS);
                 }
             }
         };
@@ -773,6 +1049,8 @@ public final class MediaCardFeature extends Feature {
             @Override
             public void onPlaybackStateChanged(PlaybackState state) {
                 updateSeekable();
+                // 暂停就把 1s 定时器摘掉，恢复播放再挂上（观感上没差别，窗口却终于能空闲）
+                tickIfPlaying();
                 if (pendingSeekMs >= 0 && state != null
                         && Math.abs(state.getPosition() - pendingSeekMs) < 1500) {
                     pendingSeekMs = -1;
@@ -782,8 +1060,10 @@ public final class MediaCardFeature extends Feature {
 
             @Override
             public void onMetadataChanged(MediaMetadata metadata) {
-                syncArt();
+                // 与 watchArtArrival 同一理由：先按新 metadata 取色，再画封面（旧底色画一张
+                // 会逼出第二次淡入，过渡被重启就成了硬跳）
                 refreshColors(true);
+                syncArt();
                 updateProgress();
             }
 
@@ -793,9 +1073,10 @@ public final class MediaCardFeature extends Feature {
             }
         };
 
-        MediaCard(View root, LinearLayout card, ImageView art, ImageView artView, SeekBar bar,
+        MediaCard(View root, ViewGroup card, ImageView art, ImageView artView, SeekBar bar,
                   SeekDrawable seekDrawable, TextView elapsed, TextView total, TextView title,
-                  TextView artist, ImageButton playBtn, ImageView sourceView, String style) {
+                  TextView artist, ImageButton playBtn, ImageView sourceView, String style,
+                  boolean expanded) {
             this.root = root;
             this.card = card;
             this.art = art;
@@ -809,13 +1090,107 @@ public final class MediaCardFeature extends Feature {
             this.playBtn = playBtn;
             this.sourceView = sourceView;
             this.style = style;
+            this.expanded = expanded;
+        }
+
+        /** 状态变化只影响 A11 的几何与取色链，其它样式行为保持不变 */
+        /**
+         * A11 **通知栏**媒体卡的封面几何（LOG-1103 §2 / §12-2/3）：
+         * 封面是正方形，边长 = 内容块（notification_media_content）的测量高度；
+         * scaleType=CENTER_INSIDE + adjustViewBounds，**没有圆角、没有底板**
+         * （A11 的 right_icon 在布局里没有任何裁剪/圆角属性，卡片圆角是 A12 才引入的）。
+         * 排版也只有一套：MediaStyle 模板的 line1=14sp sans-serif-medium、副文=12**dp**（不是 sp）。
+         * 原来"展开 52dp+2dp 圆角+底板 / 收起 36dp"和"展开 16/14/14sp"两套，都是 QS 播放器的
+         * media_view.xml 常量串进来的（§10）。
+         */
+        void applyA11ArtGeometry() {
+            try {
+                Context ctx = card.getContext();
+                // 先按 A11 的判据把进度条容器摆好，再量内容列高度（顺序反了封面会大一档，§15-7）
+                applyA11SeekVisibility();
+                // 封面正方形的边长 = 内容列（A11 的 notification_media_content）的测量高度（§2）
+                int contentH = a11Column != null ? a11Column.getMeasuredHeight()
+                        : card.getMeasuredHeight() - card.getPaddingTop() - card.getPaddingBottom();
+                int size = A11NotifSpec.artSidePx(contentH);
+                android.view.ViewGroup.LayoutParams lp = artView.getLayoutParams();
+                if (lp != null) {
+                    // 量不到就先保留现有尺寸，布局完成后再补一次（见下方的 post）
+                    if (size > 0) {
+                        lp.width = size;
+                        lp.height = size;
+                        artView.setLayoutParams(lp);
+                    } else {
+                        size = lp.height;
+                    }
+                }
+                // §15-4：两份模板的 right_icon 都是 scaleType=6=**centerCrop**（枚举表核对过，
+                // 不是 centerInside）；A11 的封面没有圆角、没有底板
+                artView.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                artView.setBackground(null);
+                artView.setClipToOutline(false);
+                title.setTypeface(a11MediumBoldTitle());
+                title.setTextSize(TypedValue.COMPLEX_UNIT_SP, A11NotifSpec.TITLE_SP);
+                // 设备（vigour）副文 = 12**sp**；AOSP 那一支才是 14dp（§15-5/§20-1）
+                artist.setTextSize(TypedValue.COMPLEX_UNIT_SP, A11NotifSpec.ARTIST_SP);
+                // 两枚时间按 QS 播放器 = 14.0**sp**（跟 fontScale；通知卡那一版才是 14dp）
+                elapsed.setTextSize(TypedValue.COMPLEX_UNIT_SP, A11NotifSpec.PLAYER_SEEK_TIME_SP);
+                total.setTextSize(TypedValue.COMPLEX_UNIT_SP, A11NotifSpec.PLAYER_SEEK_TIME_SP);
+                Log.i(TAG, "a11 art state=" + (expanded ? "expanded" : "collapsed")
+                        + " size=" + size + " contentH=" + contentH
+                        + " scaleType=" + artView.getScaleType()
+                        + " clip=" + artView.getClipToOutline()
+                        + " titlePx=" + Math.round(title.getTextSize())
+                        + " subtextPx=" + Math.round(artist.getTextSize())
+                        + " timePx=" + Math.round(elapsed.getTextSize())
+                        // titleMedium 是"状态没清"的见证：两态都必须带 medium 族
+                        + " titleMedium=" + (title.getTypeface() == a11MediumBoldTitle() ? 1 : 0)
+                        // 收起态整条 seek 容器必须 GONE（A11 默认没有紧凑进度条，§15-7）
+                        + " seekVis=" + (a11SeekWrap == null ? -1 : a11SeekWrap.getVisibility())
+                        // 触控带读回视图真实 padding：16dp=播放器那一版；24dp=又拿通知卡那一版喂进来了
+                        + " padTbPx=" + bar.getPaddingTop()
+                        // 进度条该不该在，判据是"展开 + 有时长 + 有会话"：只报 dur 的话，
+                        // 会话被拆掉那一帧会被门禁当成"该露却没露"（其实是该藏）
+                        + " seekDur=" + lastDurationMs
+                        + " seekSession=" + (controller != null ? 1 : 0));
+                if (a11SpecWitness != null) {
+                    long now = android.os.SystemClock.uptimeMillis();
+                    if (now - a11SpecWitnessAt > 4000) {
+                        a11SpecWitnessAt = now;
+                        Log.i(TAG, a11SpecWitness);
+                    }
+                }
+                if (contentH <= 0) {
+                    // 卡片还没量过：布局完成后再走一次，否则封面尺寸会停在旧值。
+                    // post 里的异常不在 Xposed 的保护范围内，必须自己兜住（会带走主线程）。
+                    card.post(() -> {
+                        try {
+                            applyA11ArtGeometry();
+                        } catch (Throwable ignored) {
+                        }
+                    });
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "a11 art geometry failed", t);
+            }
+        }
+
+        void setState(Boolean next) {
+            if (next == null || !"a11".equals(style) || next.booleanValue() == expanded) {
+                return;
+            }
+            expanded = next.booleanValue();
+            applyA11ArtGeometry();
+            // a11 的取色链两态不同（收起=着色行 + WCAG 校正，展开=恒深卡 + 白色阶），
+            // 只换几何不换色 = 收起的彩色贴在展开的深色卡上
+            applyPalette(false, null);
         }
 
         static MediaCard build(Context ctx, View root, ViewGroup actions, TextView title,
                                TextView artist, ImageView art, ImageView sourceIcon, int headerId,
-                               String style) {
+                               String style, boolean expanded) {
             ensureWidgetService(ctx);
             boolean m3 = "material".equals(style);
+            boolean a11 = "a11".equals(style);
             boolean night = isNight(ctx);
             int primary = night ? 0xFFFFFFFF : (m3 ? 0xFF2A1A15 : 0xFF241A16);
             int secondary = night ? 0xB3FFFFFF : (m3 ? 0x8C5A4038 : 0x8C322319);
@@ -825,16 +1200,46 @@ public final class MediaCardFeature extends Feature {
             root.setPadding(0, 0, 0, 0);
             ((ViewGroup) root).setClipChildren(false);
             ((ViewGroup) root).setClipToPadding(false);
+            TextView appName = null;
             if (headerId != 0) {
                 View header = root.findViewById(headerId);
                 if (header != null) {
+                    if (a11) {
+                        // A11 的卡顶有"app 名 + 时间"那一行（§20-1）：把 app_name_text 摘出来复用，
+                        // 其余头部节点照旧整块藏掉
+                        int anId = id(ctx, "app_name_text");
+                        View v = anId == 0 ? null : header.findViewById(anId);
+                        if (v instanceof TextView) {
+                            appName = (TextView) v;
+                        }
+                        Log.i(TAG, "a11 header appName id=" + anId
+                                + " found=" + (appName != null)
+                                + " text=" + (appName == null ? "-" : appName.getText()));
+                    }
                     header.setVisibility(View.GONE);
                 }
             }
 
-            LinearLayout card = new LinearLayout(ctx);
-            card.setOrientation(LinearLayout.VERTICAL);
-            card.setPadding(dp(ctx, 16), dp(ctx, 15), dp(ctx, 16), dp(ctx, 13));
+            // a11 走 A11 模板的骨架（LOG-1103 §20-3）：根 = FrameLayout，封面 TOP|END 正方形压在右上，
+            // 竖向内容列自上而下 = 头部行 / 文字列 / 动作带 / 进度条 + 时间行。
+            // 其它样式仍是"卡片即竖向三行"。column = "行往哪儿放"：非 a11 时就是 card 本身。
+            ViewGroup card;
+            if (a11) {
+                card = new FrameLayout(ctx);
+            } else {
+                LinearLayout vertical = new LinearLayout(ctx);
+                vertical.setOrientation(LinearLayout.VERTICAL);
+                card = vertical;
+            }
+            ViewGroup column;
+            if (a11) {
+                column = new LinearLayout(ctx);
+                ((LinearLayout) column).setOrientation(LinearLayout.VERTICAL);
+            } else {
+                column = card;
+            }
+            card.setPadding(a11 ? 0 : dp(ctx, 16), a11 ? 0 : dp(ctx, 15),
+                    a11 ? 0 : dp(ctx, 16), a11 ? 0 : dp(ctx, 13));
             GradientDrawable bg = new GradientDrawable(
                     GradientDrawable.Orientation.TOP_BOTTOM,
                     m3
@@ -842,40 +1247,47 @@ public final class MediaCardFeature extends Feature {
                                      : new int[]{0xFFF7DED4, 0xFFFBEADE})
                             : (night ? new int[]{0xFF2A211C, 0xFF211915}
                                      : new int[]{0xFFFDF6EC, 0xFFF8EDE1}));
-            bg.setCornerRadius(dp(ctx, m3 ? 28 : 24));
+            bg.setCornerRadius(a11 ? a11ArtRadiusPx(ctx) : dp(ctx, m3 ? 28 : 24));
             card.setBackground(bg);
 
-            // row 1: art + title/artist
-            LinearLayout top = new LinearLayout(ctx);
-            top.setOrientation(LinearLayout.HORIZONTAL);
-            top.setGravity(Gravity.CENTER_VERTICAL);
+            // 封面。A11 的 right_icon：scaleType=6=**centerCrop**（§15-4，枚举表核对过），
+            // 没有圆角、没有底板、没有阴影；位置在卡片的 TOP|END（§15-3），见下面的装配分支。
             ImageView artView = new ImageView(ctx);
             artView.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            GradientDrawable artBg = new GradientDrawable();
-            artBg.setColor(night ? 0x33FFFFFF : 0x14000000);
-            artBg.setCornerRadius(dp(ctx, m3 ? 16 : 8));
-            artView.setBackground(artBg);
-            artView.setClipToOutline(true);
-            artView.setElevation(dp(ctx, 2));
+            if (a11) {
+                artView.setBackground(null);
+                artView.setClipToOutline(false);
+            } else {
+                GradientDrawable artBg = new GradientDrawable();
+                artBg.setColor(night ? 0x33FFFFFF : 0x14000000);
+                artBg.setCornerRadius(dp(ctx, m3 ? 16 : 8));
+                artView.setBackground(artBg);
+                artView.setClipToOutline(true);
+                artView.setElevation(dp(ctx, 2));
+            }
             if (art != null) {
                 if (art.getDrawable() != null) {
                     artView.setImageDrawable(art.getDrawable());
                 }
                 art.setVisibility(View.GONE);
+                if (a11) {
+                    // 换歌那一拍 RemoteViews 会把它设回可见 ⇒ 右边闪一下小封面，挂自愈守卫
+                    guardArtHidden(art);
+                }
             }
-            top.addView(artView, new LinearLayout.LayoutParams(
-                    dp(ctx, m3 ? 64 : 60), dp(ctx, m3 ? 64 : 60)));
             LinearLayout texts = new LinearLayout(ctx);
             texts.setOrientation(LinearLayout.VERTICAL);
-            LinearLayout.LayoutParams textsLp = new LinearLayout.LayoutParams(
-                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-            textsLp.leftMargin = dp(ctx, 12);
-            texts.setLayoutParams(textsLp);
             reparent(title);
             CharSequence titleCs = title.getText();
             title.setText(titleCs == null ? "" : titleCs.toString());
-            title.setTextSize(TypedValue.COMPLEX_UNIT_SP, m3 ? 16 : 17);
-            title.setTypeface(null, android.graphics.Typeface.BOLD);
+            title.setTextSize(TypedValue.COMPLEX_UNIT_SP,
+                    a11 ? A11NotifSpec.TITLE_SP : (m3 ? 16 : 17));
+            if (a11) {
+                // 设备真值（§20-1）：父样式给 sans-serif-medium 族，布局又叠了 textStyle=BOLD
+                title.setTypeface(a11MediumBoldTitle());
+            } else {
+                title.setTypeface(null, android.graphics.Typeface.BOLD);
+            }
             title.setTextColor(primary);
             title.setSingleLine(true);
             title.setEllipsize(TextUtils.TruncateAt.END);
@@ -886,31 +1298,67 @@ public final class MediaCardFeature extends Feature {
                 reparent(artist);
                 CharSequence artistCs = artist.getText();
                 artist.setText(artistCs == null ? "" : artistCs.toString());
-                artist.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+                // 副文：设备 vigour_notification_text_size = 12**sp**（AOSP 那一支才是 14dp）
+                artist.setTextSize(TypedValue.COMPLEX_UNIT_SP,
+                        a11 ? A11NotifSpec.ARTIST_SP : 12.5f);
                 artist.setTextColor(secondary);
                 artist.setSingleLine(true);
                 artist.setEllipsize(TextUtils.TruncateAt.END);
                 artist.setPadding(0, 0, 0, 0);
                 LinearLayout.LayoutParams al = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                al.topMargin = dp(ctx, 4);
+                al.topMargin = a11 ? dp(ctx, A11NotifSpec.ARTIST_MARGIN_TOP_DP) : dp(ctx, 4);
                 texts.addView(artist, al);
             }
-            top.addView(texts);
-            card.addView(top, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            if (a11) {
+                // 文字列 = notification_main_column：marginTop 42dp、左右 20dp、
+                // 最小高 61dp（由 setContentMinHeight 写进来，§15-10/§20-1）
+                LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                tlp.topMargin = dp(ctx, A11NotifSpec.DEVICE_COLUMN_MARGIN_TOP_DP);
+                tlp.leftMargin = dp(ctx, A11NotifSpec.DEVICE_COLUMN_MARGIN_SIDE_DP);
+                tlp.rightMargin = dp(ctx, A11NotifSpec.DEVICE_COLUMN_MARGIN_SIDE_DP);
+                texts.setMinimumHeight(dp(ctx, A11NotifSpec.MIN_CONTENT_HEIGHT_DP));
+                column.addView(texts, tlp);
+            } else {
+                LinearLayout top = new LinearLayout(ctx);
+                top.setOrientation(LinearLayout.HORIZONTAL);
+                top.setGravity(Gravity.CENTER_VERTICAL);
+                LinearLayout.LayoutParams textsLp = new LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+                textsLp.leftMargin = dp(ctx, 12);
+                texts.setLayoutParams(textsLp);
+                top.addView(artView, new LinearLayout.LayoutParams(
+                        dp(ctx, m3 ? 64 : 60), dp(ctx, m3 ? 64 : 60)));
+                top.addView(texts);
+                column.addView(top, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
 
-            // row 2: elapsed / seek / total
-            LinearLayout seekRow = new LinearLayout(ctx);
-            seekRow.setOrientation(LinearLayout.HORIZONTAL);
-            seekRow.setGravity(Gravity.CENTER_VERTICAL);
+            // 进度条 + 两枚时间。A11 的排布不是"时间夹在条两侧"，
+            // 而是条独占一行（满宽，会穿过封面区，与原生一致），时间在条**下方**左右贴边（§15-6/§20-2）。
+            // 进度条这一排按**用户指定的 A11 QS 播放器**画（media_view.xml:23-40/116-128）：
+            // 两枚时间在条左右两端同一行，条吃剩余宽、paddingTB 16dp、maxHeight 3dp、thumb 常驻。
+            // （通知卡那一版是"条满宽 + 时间在条下方左右贴边 + 不可拖时 thumb 透明"，
+            //  常数还留在 A11NotifSpec 里，但产品不用那一版。）
             TextView elapsed = new TextView(ctx);
-            elapsed.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f);
+            if (a11) {
+                // QS 这里是 14.0**sp**（跟 fontScale）
+                elapsed.setTextSize(TypedValue.COMPLEX_UNIT_SP, A11NotifSpec.PLAYER_SEEK_TIME_SP);
+            } else {
+                elapsed.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f);
+            }
             elapsed.setTextColor(secondary);
             elapsed.setText("0:00");
             elapsed.setGravity(Gravity.END);
             elapsed.setMinWidth(dp(ctx, 28));
             elapsed.setFontFeatureSettings("tnum");
+            LinearLayout seekRow = new LinearLayout(ctx);
+            seekRow.setOrientation(LinearLayout.HORIZONTAL);
+            seekRow.setGravity(Gravity.CENTER_VERTICAL);
+            // a11 时这一排挂进内容列的动作带之后（见下面 column.addView(seekWrap)），
+            // 并且要能被"收起态/无时长就没有条"这条 A11 判据整体摘掉（§15-7）
+            LinearLayout seekWrap = a11 ? seekRow : null;
             seekRow.addView(elapsed, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -927,7 +1375,14 @@ public final class MediaCardFeature extends Feature {
             bar.setMax(1);
             bar.setProgress(0);
             bar.setSplitTrack(false);
-            bar.setPadding(dp(ctx, 6), dp(ctx, 6), dp(ctx, 6), dp(ctx, 6));
+            if (a11) {
+                // QS：paddingTop/Bottom 各 16dp（触控带 32dp + 轨道），不靠负 margin 收
+                bar.setPadding(dp(ctx, 4), dp(ctx, A11NotifSpec.PLAYER_SEEK_PADDING_TB_DP),
+                        dp(ctx, 4), dp(ctx, A11NotifSpec.PLAYER_SEEK_PADDING_TB_DP));
+                bar.setMinimumHeight(dp(ctx, 20));
+            } else {
+                bar.setPadding(dp(ctx, 6), dp(ctx, 6), dp(ctx, 6), dp(ctx, 6));
+            }
             bar.setBackground(null);
             SeekDrawable seekDrawable = new SeekDrawable(
                     night ? 0x33FFFFFF : 0x1F000000,
@@ -943,13 +1398,25 @@ public final class MediaCardFeature extends Feature {
                     + " progDrawable=" + (bar.getProgressDrawable() == null ? "null"
                             : bar.getProgressDrawable().getClass().getSimpleName())
                     + " enabled=" + bar.isEnabled());
-            LinearLayout.LayoutParams bl = new LinearLayout.LayoutParams(0, dp(ctx, 24), 1f);
-            bl.leftMargin = dp(ctx, 2);
-            bl.rightMargin = dp(ctx, 2);
+            LinearLayout.LayoutParams bl;
+            if (a11) {
+                // 条在两枚时间中间吃剩余宽（QS 的 layout_width=0dp + weight）
+                bl = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+                bl.leftMargin = dp(ctx, 4);
+                bl.rightMargin = dp(ctx, 4);
+            } else {
+                bl = new LinearLayout.LayoutParams(0, dp(ctx, 24), 1f);
+                bl.leftMargin = dp(ctx, 2);
+                bl.rightMargin = dp(ctx, 2);
+            }
             seekRow.addView(bar, bl);
 
             TextView total = new TextView(ctx);
-            total.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f);
+            if (a11) {
+                total.setTextSize(TypedValue.COMPLEX_UNIT_SP, A11NotifSpec.PLAYER_SEEK_TIME_SP);
+            } else {
+                total.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f);
+            }
             total.setTextColor(secondary);
             total.setText("0:00");
             total.setGravity(Gravity.START);
@@ -957,23 +1424,26 @@ public final class MediaCardFeature extends Feature {
             total.setFontFeatureSettings("tnum");
             seekRow.addView(total, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-            LinearLayout.LayoutParams seekRowLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            seekRowLp.topMargin = dp(ctx, 11);
-            card.addView(seekRow, seekRowLp);
+            if (!a11) {
+                LinearLayout.LayoutParams seekRowLp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                seekRowLp.topMargin = dp(ctx, 11);
+                column.addView(seekRow, seekRowLp);
+            }
 
             // 现场几何取证：条在部分机器上塌成 0 宽（两侧时间贴在一起），
             // 绑定阶段 getLocationOnScreen 还是 0，所以等布局完成后再量一次
             bar.post(() -> {
                 try {
+                    View row = bar.getParent() instanceof View ? (View) bar.getParent() : null;
                     Log.i(TAG, "card bar geom: bar=" + bar.getWidth() + 'x' + bar.getHeight()
-                            + " row=" + seekRow.getWidth() + 'x' + seekRow.getHeight()
-                            + " rowW=" + seekRow.getMeasuredWidth()
+                            + " row=" + (row == null ? "null" : row.getWidth() + 'x' + row.getHeight())
+                            + " rowW=" + (row == null ? -1 : row.getMeasuredWidth())
                             + " card=" + card.getWidth()
                             + " el=" + elapsed.getWidth() + " tot=" + total.getWidth()
                             + " weight=" + ((LinearLayout.LayoutParams) bar.getLayoutParams()).weight
-                            + " count=" + seekRow.getChildCount());
+                            + " count=" + (row instanceof ViewGroup
+                                    ? ((ViewGroup) row).getChildCount() : -1));
                     StringBuilder chain = new StringBuilder();
                     android.view.View p2 = bar;
                     for (int i = 0; i < 9 && p2 != null; i++) {
@@ -996,30 +1466,39 @@ public final class MediaCardFeature extends Feature {
             // row 3: source / prev / play / next / heart
             LinearLayout controls = new LinearLayout(ctx);
             controls.setOrientation(LinearLayout.HORIZONTAL);
-            controls.setGravity(Gravity.CENTER_VERTICAL);
-
-            FrameLayout sourceSlot = new FrameLayout(ctx);
-            LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(0, dp(ctx, 44), 1f);
-            controls.addView(sourceSlot, sl);
+            controls.setGravity(a11 ? Gravity.TOP : Gravity.CENTER_VERTICAL);
+            if (a11) {
+                // 两份 A11 模板都写了 layoutDirection=0，而 attr 枚举里 **0=ltr**（不是 inherit）
+                controls.setLayoutDirection(View.LAYOUT_DIRECTION_LTR);
+            }
             ImageView sourceView = new ImageView(ctx);
             sourceView.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-            GradientDrawable ph = new GradientDrawable();
-            ph.setShape(GradientDrawable.OVAL);
-            ph.setColor(night ? 0x1FFFFFFF : 0x14000000);
-            sourceView.setBackground(ph);
-            sourceView.setClipToOutline(true);
+            if (!a11) {
+                GradientDrawable ph = new GradientDrawable();
+                ph.setShape(GradientDrawable.OVAL);
+                ph.setColor(night ? 0x1FFFFFFF : 0x14000000);
+                sourceView.setBackground(ph);
+                sourceView.setClipToOutline(true);
+            }
             if (sourceIcon != null && sourceIcon.getDrawable() != null) {
                 sourceView.setImageDrawable(sourceIcon.getDrawable());
             }
-            FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(
-                    dp(ctx, 30), dp(ctx, 30), Gravity.START | Gravity.CENTER_VERTICAL);
-            sourceSlot.addView(sourceView, flp);
+            int sourceDp = a11 ? A11NotifSpec.HEADER_ICON_DP : 30;
+            if (!a11) {
+                // 非 a11：应用图标留在动作带左侧的权重槽里（原排版）
+                FrameLayout sourceSlot = new FrameLayout(ctx);
+                controls.addView(sourceSlot, new LinearLayout.LayoutParams(0, dp(ctx, 44), 1f));
+                FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(
+                        dp(ctx, sourceDp), dp(ctx, sourceDp), Gravity.START | Gravity.CENTER_VERTICAL);
+                sourceSlot.addView(sourceView, flp);
+            }
 
             ImageButton prev = null;
             ImageButton play = null;
             ImageButton next = null;
             ImageButton heart = null;
             List<ImageButton> others = new ArrayList<>();
+            List<ImageButton> ordered = new ArrayList<>();
             int n = actions.getChildCount();
             for (int i = 0; i < n; i++) {
                 View child = actions.getChildAt(i);
@@ -1027,6 +1506,9 @@ public final class MediaCardFeature extends Feature {
                     continue;
                 }
                 ImageButton b = (ImageButton) child;
+                // A11 的动作带按 notification 的 action 顺序原样排（不重排成 prev-play-next），
+                // 所以先留一份快照：下面 reparent 会改动 actions 的子项
+                ordered.add(b);
                 String desc = b.getContentDescription() == null ? "" : b.getContentDescription().toString();
                 Log.i(TAG, "action[" + i + "] desc=" + desc);
                 if (isPrev(desc)) {
@@ -1069,33 +1551,72 @@ public final class MediaCardFeature extends Feature {
                 heart = others.get(0);
             }
 
-            addControl(ctx, controls, prev, 40, primary);
-            addControl(ctx, controls, play, 44, accent);
-            addControl(ctx, controls, next, 40, primary);
-
-            FrameLayout heartSlot = new FrameLayout(ctx);
-            LinearLayout.LayoutParams hl = new LinearLayout.LayoutParams(0, dp(ctx, 44), 1f);
-            controls.addView(heartSlot, hl);
-            if (heart != null) {
-                reparent(heart);
-                heart.setBackground(null);
-                heart.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-                heart.setMinimumWidth(dp(ctx, 40));
-                heart.setMinimumHeight(dp(ctx, 40));
-                int hp = Math.round(dp(ctx, 40) * 0.16f);
-                heart.setPadding(hp, hp, hp, hp);
-                if (night) {
-                    heart.setColorFilter(primary);
+            // 动作带。设备真值（§20-1，vigour 那颗）：**36×40dp**、padding 上下 8dp / 左右 6dp、
+            // 左右各 2dp 外边距、scaleType=centerInside(7)、背景 @android:color/transparent
+            //（所以原生这一支没有水波纹层）。颜色 = 正文主色（§5b/§15-8：着色时
+            // getActionColor(p) == getPrimaryTextColor(p)）⇒ 原生不存在"按钮压暗到看不清"。
+            // AOSP 那一支才是 48dp 方形 + 8dp 内缩 + borderless（有 ripple），记在 A11NotifSpec 里备用。
+            int ctrlTint = primary;
+            if (a11) {
+                for (ImageButton b : ordered) {
+                    addA11Control(ctx, controls, b, ctrlTint);
                 }
-                FrameLayout.LayoutParams hflp = new FrameLayout.LayoutParams(
-                        dp(ctx, 40), dp(ctx, 40), Gravity.END | Gravity.CENTER_VERTICAL);
-                heartSlot.addView(heart, hflp);
+                LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                clp.leftMargin = dp(ctx, A11NotifSpec.DEVICE_ACTIONS_MARGIN_START_DP);
+                clp.rightMargin = dp(ctx, A11NotifSpec.DEVICE_ACTIONS_MARGIN_END_DP);
+                column.addView(controls, clp);
+            } else {
+                addControl(ctx, controls, prev, 40, ctrlTint);
+                addControl(ctx, controls, play, 44, accent);
+                addControl(ctx, controls, next, 40, ctrlTint);
+
+                FrameLayout heartSlot = new FrameLayout(ctx);
+                LinearLayout.LayoutParams hl = new LinearLayout.LayoutParams(0, dp(ctx, 44), 1f);
+                controls.addView(heartSlot, hl);
+                if (heart != null) {
+                    reparent(heart);
+                    heart.setBackground(null);
+                    heart.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+                    heart.setMinimumWidth(dp(ctx, 40));
+                    heart.setMinimumHeight(dp(ctx, 40));
+                    int hp = Math.round(dp(ctx, 40) * 0.16f);
+                    heart.setPadding(hp, hp, hp, hp);
+                    if (night) {
+                        heart.setColorFilter(primary);
+                    }
+                    FrameLayout.LayoutParams hflp = new FrameLayout.LayoutParams(
+                            dp(ctx, 40), dp(ctx, 40), Gravity.END | Gravity.CENTER_VERTICAL);
+                    heartSlot.addView(heart, hflp);
+                }
+                LinearLayout.LayoutParams controlsLp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                controlsLp.topMargin = dp(ctx, 7);
+                column.addView(controls, controlsLp);
             }
 
-            LinearLayout.LayoutParams controlsLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            controlsLp.topMargin = dp(ctx, 7);
-            card.addView(controls, controlsLp);
+            if (a11) {
+                // A11 竖向列的最后一件：进度条 + 时间行（动作带之后、列末尾，§15-9）。
+                // 左右内缩必须与文字列同一档（20dp）：列本身没有 padding，谁忘加就贴着卡片边，
+                // 于是"左边那枚时间溢出去"（11-04 真机实测 elapsed 落在 x=60，与行左边齐平）。
+                LinearLayout.LayoutParams seekLp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                seekLp.leftMargin = dp(ctx, A11NotifSpec.DEVICE_COLUMN_MARGIN_SIDE_DP);
+                seekLp.rightMargin = dp(ctx, A11NotifSpec.DEVICE_COLUMN_MARGIN_SIDE_DP);
+                column.addView(seekWrap, seekLp);
+                card.addView(column, new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                // 头部行（44dp，图标 16dp + app 名 12sp）与封面（TOP|END 正方形）都挂在根 FrameLayout 上，
+                // 这样"文字列 marginTop 42dp 是为了让开绝对定位的头部行"这条 A11 的排布逻辑才成立
+                card.addView(buildA11HeaderRow(ctx, sourceView, appName, secondary),
+                        new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                                dp(ctx, A11NotifSpec.HEADER_HEIGHT_DP),
+                                Gravity.START | Gravity.TOP));
+                int initSide = dp(ctx, A11NotifSpec.DEVICE_COLUMN_MARGIN_TOP_DP
+                        + A11NotifSpec.MIN_CONTENT_HEIGHT_DP);
+                card.addView(artView, new FrameLayout.LayoutParams(initSide, initSide,
+                        Gravity.END | Gravity.TOP));
+            }
 
             ViewGroup parent = (ViewGroup) root;
             if (parent instanceof LinearLayout) {
@@ -1110,7 +1631,37 @@ public final class MediaCardFeature extends Feature {
             clearAncestorBackgrounds(root);
 
             MediaCard mc = new MediaCard(root, card, art, artView, bar, seekDrawable, elapsed,
-                    total, title, artist, play, sourceView, style);
+                    total, title, artist, play, sourceView, style, expanded);
+            if ("a11".equals(style)) {
+                mc.a11Column = column;
+                mc.a11HeaderName = appName;
+                mc.a11SeekWrap = seekWrap;
+                mc.applyA11ArtGeometry();
+                // 规格见证：门禁据此断言尺寸（dp 换算后的 px），不依赖任何截图。
+                // 数值全部来自 LOG-1103 §20-1 的**设备分支**（IS_TIER_VOS=false ⇒ vigour 模板）；
+                // AOSP 那一支（48dp 方按钮 / 列边距 46-16 / minHeight 39）记在 A11NotifSpec 里备查。
+                mc.a11SpecWitness = "a11 card spec artSide=contentHeight btnPad="
+                        + dp(ctx, A11NotifSpec.DEVICE_BUTTON_PADDING_TB_DP)
+                        + " btnEnd=" + dp(ctx, A11NotifSpec.DEVICE_BUTTON_MARGIN_DP)
+                        + " btn=" + dp(ctx, A11NotifSpec.DEVICE_BUTTON_W_DP) + "x"
+                        + dp(ctx, A11NotifSpec.DEVICE_BUTTON_H_DP)
+                        + " src=" + dp(ctx, sourceDp)
+                        + " titlePx=" + Math.round(title.getTextSize())
+                        + " artistPx=" + Math.round(artist == null ? 0 : artist.getTextSize())
+                        + " timePx=" + Math.round(elapsed.getTextSize())
+                        + " trackDp=" + A11NotifSpec.SEEK_TRACK_DP
+                        + " colTop=" + dp(ctx, A11NotifSpec.DEVICE_COLUMN_MARGIN_TOP_DP)
+                        + " colSide=" + dp(ctx, A11NotifSpec.DEVICE_COLUMN_MARGIN_SIDE_DP)
+                        + " colMinH=" + dp(ctx, A11NotifSpec.MIN_CONTENT_HEIGHT_DP)
+                        + " headH=" + dp(ctx, A11NotifSpec.HEADER_HEIGHT_DP)
+                        + " actMargin=" + dp(ctx, A11NotifSpec.DEVICE_ACTIONS_MARGIN_START_DP)
+                        + "/" + dp(ctx, A11NotifSpec.DEVICE_ACTIONS_MARGIN_END_DP)
+                        + " density=" + ctx.getResources().getDisplayMetrics().density
+                        + " fontScale=" + ctx.getResources().getConfiguration().fontScale
+                        + " radius=" + a11ArtRadiusPx(ctx)
+                        + " hostCorner=" + hostDialogCornerRadiusPx(ctx);
+                Log.i(TAG, mc.a11SpecWitness);
+            }
             mc.applyPalette(false, null);
             mc.syncArt();
             bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
@@ -1150,6 +1701,9 @@ public final class MediaCardFeature extends Feature {
                     if (done) {
                         mc.pendingSeekMs = target;
                         mc.suppressUntil = SystemClock.elapsedRealtime() + 2000;
+                        // 暂停态已经没有秒级定时器了（tickIfPlaying 只在播放/拖动时挂着），
+                        // 所以这一下必须自己刷一次，否则时间与条停在拖动手势的残值上
+                        mc.updateProgress();
                     } else {
                         mc.pendingSeekMs = -1;
                         mc.updateProgress();
@@ -1178,6 +1732,12 @@ public final class MediaCardFeature extends Feature {
 
         private static void addControl(Context ctx, LinearLayout parent, ImageButton b,
                                        int sizeDp, int tint) {
+            addControl(ctx, parent, b, sizeDp, tint, 0, 0);
+        }
+
+        /** padDp/endDp 给 0 表示沿用原来的"16% 内缩"；A11 要显式给 8dp/2dp（LOG-1103 §5a）。 */
+        private static void addControl(Context ctx, LinearLayout parent, ImageButton b,
+                                       int sizeDp, int tint, int padDp, int endDp) {
             if (b == null) {
                 View v = new View(ctx);
                 parent.addView(v, new LinearLayout.LayoutParams(0, dp(ctx, sizeDp), 1f));
@@ -1188,12 +1748,77 @@ public final class MediaCardFeature extends Feature {
             b.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
             b.setMinimumWidth(dp(ctx, sizeDp));
             b.setMinimumHeight(dp(ctx, sizeDp));
-            int pad = Math.round(dp(ctx, sizeDp) * 0.16f);
+            int pad = padDp > 0 ? dp(ctx, padDp) : Math.round(dp(ctx, sizeDp) * 0.16f);
             b.setPadding(pad, pad, pad, pad);
             if (tint != 0) {
                 b.setColorFilter(tint);
             }
-            parent.addView(b, new LinearLayout.LayoutParams(0, dp(ctx, sizeDp), 1f));
+            LinearLayout.LayoutParams blp =
+                    new LinearLayout.LayoutParams(0, dp(ctx, sizeDp), 1f);
+            if (endDp > 0) {
+                blp.rightMargin = dp(ctx, endDp);
+            }
+            parent.addView(b, blp);
+        }
+
+        /**
+         * 设备分支的动作按钮（LOG-1103 §20-1，`vigour_notification_material_media_action_q`）：
+         * 36×40dp、padding 上下 8dp / 左右 6dp、左右各 2dp 外边距、scaleType=centerInside(7)、
+         * 背景 `@android:color/transparent` ⇒ 这一支原生没有水波纹层。
+         * 图标色 = 正文主色：`bindMediaActionButton` 在着色时取 `getPrimaryTextColor(p)`（§5b/§15-8），
+         * 也就是与标题同一支颜色 —— "按钮看不清"在原生逻辑里不该发生。
+         */
+        private static void addA11Control(Context ctx, LinearLayout parent, ImageButton b, int tint) {
+            if (b == null) {
+                return;
+            }
+            reparent(b);
+            b.setBackground(null);
+            b.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+            int ptb = dp(ctx, A11NotifSpec.DEVICE_BUTTON_PADDING_TB_DP);
+            int plr = dp(ctx, A11NotifSpec.DEVICE_BUTTON_PADDING_LR_DP);
+            b.setPadding(plr, ptb, plr, ptb);
+            if (tint != 0) {
+                b.setColorFilter(tint);
+            }
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    dp(ctx, A11NotifSpec.DEVICE_BUTTON_W_DP), dp(ctx, A11NotifSpec.DEVICE_BUTTON_H_DP));
+            lp.leftMargin = dp(ctx, A11NotifSpec.DEVICE_BUTTON_MARGIN_DP);
+            lp.rightMargin = dp(ctx, A11NotifSpec.DEVICE_BUTTON_MARGIN_DP);
+            parent.addView(b, lp);
+        }
+
+        /**
+         * A11 卡顶那一行（§20-1）：高 44dp、padding 上 16 / 下 12 / 左右 20，
+         * 内容 = 16dp 应用小图标（marginEnd 8dp）+ app 名（12sp）。
+         * 媒体通知 `showWhen=false`（§1 的 i 音乐真机样本），所以 A11 这一行也只有名字，没有时间。
+         */
+        private static LinearLayout buildA11HeaderRow(Context ctx, ImageView icon, TextView appName,
+                                                      int nameColor) {
+            LinearLayout row = new LinearLayout(ctx);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(ctx, A11NotifSpec.HEADER_PADDING_SIDE_DP),
+                    dp(ctx, A11NotifSpec.HEADER_PADDING_TOP_DP),
+                    dp(ctx, A11NotifSpec.HEADER_PADDING_SIDE_DP),
+                    dp(ctx, A11NotifSpec.HEADER_PADDING_BOTTOM_DP));
+            if (icon != null) {
+                reparent(icon);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                        dp(ctx, A11NotifSpec.HEADER_ICON_DP), dp(ctx, A11NotifSpec.HEADER_ICON_DP));
+                lp.rightMargin = dp(ctx, 8);
+                row.addView(icon, lp);
+            }
+            if (appName != null) {
+                reparent(appName);
+                appName.setTextSize(TypedValue.COMPLEX_UNIT_SP, A11NotifSpec.HEADER_TEXT_SP);
+                appName.setTextColor(nameColor);
+                appName.setSingleLine(true);
+                appName.setEllipsize(TextUtils.TruncateAt.END);
+                row.addView(appName, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+            return row;
         }
 
         private static void clearAncestorBackgrounds(View root) {
@@ -1304,6 +1929,41 @@ public final class MediaCardFeature extends Feature {
             return b;
         }
 
+        /** 已经挂过"原生封面自愈隐藏"守卫的那一颗 right_icon */
+        private static final WeakHashMap<View, Boolean> ART_HIDE_GUARD = new WeakHashMap<>();
+
+        /**
+         * 换歌那一拍 RemoteViews 会把 `android:id/right_icon` 重新设回可见（A11 的封面位本来就是它），
+         * 于是用户看到**右边闪一下小图标版的封面**。建卡时按一次 GONE 不够，必须挂在这颗视图自己的
+         * 布局回调上自愈回来：只在"确实又露出来"时写一次，不做每帧轮询（高频写正是本项目抖动的老根）。
+         */
+        private static void guardArtHidden(final ImageView art) {
+            if (art == null) {
+                return;
+            }
+            synchronized (ART_HIDE_GUARD) {
+                if (Boolean.TRUE.equals(ART_HIDE_GUARD.get(art))) {
+                    return;
+                }
+                ART_HIDE_GUARD.put(art, Boolean.TRUE);
+            }
+            art.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                @Override
+                public void onLayoutChange(View v, int left, int top, int right, int bottom,
+                                           int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                    try {
+                        if (v.getVisibility() == View.GONE) {
+                            return;
+                        }
+                        v.setVisibility(View.GONE);
+                        Log.i(TAG, "a11 art native reshown rehidden vis=" + v.getVisibility()
+                                + " w=" + v.getWidth() + " h=" + v.getHeight());
+                    } catch (Throwable ignored) {
+                    }
+                }
+            });
+        }
+
         static Bitmap viewArtBitmap(ImageView art) {
             if (art == null) {
                 return null;
@@ -1338,6 +1998,58 @@ public final class MediaCardFeature extends Feature {
 
         private static int artHash(ImageView art) {
             return artHash(viewArtBitmap(art));
+        }
+
+        /**
+         * 把任意 Drawable 按它自己的尺寸画进位图。A11 就是这么干的（`Icon.toBitmap()` /
+         * MediaNotificationProcessor 拿到的是 bitmap），因为 vivo 挂在 `android:id/art` 上的
+         * 常常**不是 BitmapDrawable**（Icon 包装 / 异步加载的那一类），只认 BitmapDrawable 就会
+         * 得到"没有封面"⇒ 卡片退回浅色底、文字用黑色，而屏幕上那张浮雕还是深色的上一首歌。
+         */
+        static Bitmap drawableToBitmap(Drawable d) {
+            if (d == null || d instanceof BitmapDrawable) {
+                return null;      // BitmapDrawable 走 viewArtBitmap 那条零拷贝路径
+            }
+            int w = d.getIntrinsicWidth();
+            int h = d.getIntrinsicHeight();
+            if (w <= 0 || h <= 0) {
+                return null;
+            }
+            // 取色只需要小图；按 256 上限缩，省内存也省每帧的像素遍历
+            float scale = Math.min(1f, 256f / Math.max(w, h));
+            int bw = Math.max(1, Math.round(w * scale));
+            int bh = Math.max(1, Math.round(h * scale));
+            try {
+                Bitmap bmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
+                Canvas c = new Canvas(bmp);
+                d.setBounds(0, 0, bw, bh);
+                d.draw(c);
+                return bmp;
+            } catch (Throwable t) {
+                return null;
+            }
+        }
+
+        /**
+         * 取色与封面的**唯一输入源**，优先级照 A11：通知自带的 largeIcon → 会话 metadata。
+         * A11 里 `MediaNotificationProcessor` 处理的就是 sbn 自己的那张图，它在切歌那一拍
+         * 已经是新一首；而 `controller.getMetadata()` 常常还停在上一首 —— 先读 metadata
+         * 就是用户报的"左边取色是上一首歌"。两处都拿不到就返回 null（**不要**拿旧图顶着）。
+         */
+        Bitmap artSource() {
+            Bitmap fromView = viewArtBitmap(art);
+            if (fromView != null) {
+                artFrom = "largeIcon";
+                return fromView;
+            }
+            Bitmap raster = art == null ? null : drawableToBitmap(art.getDrawable());
+            if (raster != null) {
+                artFrom = "largeIconDrawn";
+                return raster;
+            }
+            Bitmap meta = controller == null ? null : metadataArt(controller.getMetadata());
+            artFrom = meta != null ? "metadata" : "none";
+            return meta;
         }
 
         static float dominantHue(Bitmap bmp) {
@@ -1494,21 +2206,82 @@ public final class MediaCardFeature extends Feature {
             try {
                 Context ctx = card.getContext();
                 boolean night = isNight(ctx);
-                Bitmap src = bmp;
-                if (src == null && controller != null) {
-                    src = metadataArt(controller.getMetadata());
-                }
-                if (src == null) {
-                    src = viewArtBitmap(art);
-                }
+                Bitmap src = bmp != null ? bmp : artSource();
                 int h = artHash(src);
-                if (h != 0 && h == lastArtHash && curBg != null) {
+                String artKey = h + "/" + style + "/" + (expanded ? "e" : "c")
+                        + (night ? "n" : "l");
+                if (h != 0 && artKey.equals(lastArtKey) && curBg != null) {
                     return;
                 }
                 boolean m3 = "material".equals(style);
+                boolean a11 = "a11".equals(style);
                 Drawable newBg;
                 int accent;
-                if (m3) {
+                // 初值只是"分支没跑到时不该拿别的样式的色"的兜底：用 A11 通知卡自己的两档，
+                // 不再引 QS 播放器那套固定白色阶（A11MediaSpec.TEXT_*，见 LOG-1103 §10）
+                int a11Primary = night ? A11NotifSpec.PRIMARY_ON_DARK : A11NotifSpec.PRIMARY_ON_LIGHT;
+                int a11Secondary = night
+                        ? A11NotifSpec.SECONDARY_ON_DARK : A11NotifSpec.SECONDARY_ON_LIGHT;
+                if (a11) {
+                    // A11 的着色判定（Notification.isColorizedMedia 的原文）：
+                    //   colorized = extras.get("android.colorized");  return (colorized==null||colorized) && hasMediaSession()
+                    // 也就是说 MediaStyle + 有会话的媒体行**默认就是着色的**，底色来自封面。
+                    // 收起/展开走**同一条链**：原来"展开态=恒深卡"是把 OS5/A15 的
+                    // MediaDataManager.computeBackgroundColor（sat×0.8、L 锁 0.25）错搬进 A11 样式，
+                    // A11 里没有这条规则（证据：LOG-1103 §3-4/§9/§12）。
+                    boolean hasSession = controller != null;
+                    boolean colorized = hasSession;
+                    // 已知缺口（记进 LOG-1103 §13）：A11 的完整判据还要看
+                    // extras["android.colorized"] 有没有被 app 显式关掉；本类拿不到 sbn
+                    // （卡片是从视图树 + MediaController 建的），而实际媒体 app 基本不显式关，
+                    // 所以这里按"有会话即着色"。要补就在 MediaCard 构造里把 sbn 传进来。
+                    // 底色 = 左半幅 background swatch（A11Palette.colorizedPair 已实现同一条链）
+                    int[] pair = src == null ? null : A11Palette.colorizedPair(src);
+                    int base = A11NotifSpec.cardBackground(
+                            colorized && pair != null, pair == null ? 0 : pair[0], night);
+                    int fg = pair != null ? pair[1] : A11NotifSpec.primaryTextColor(base, night);
+                    int primary = A11NotifSpec.primaryTextColor(base, night);
+                    int secondary = A11NotifSpec.secondaryTextColor(base, night);
+                    if (colorized && base != 0) {
+                        // 着色时 A11 只调 alpha 把文字拉到 4.5:1（ensureColors 的第一支，LOG §9-4）
+                        primary = A11NotifSpec.findAlphaToMeetContrast(primary, base, 4.5d);
+                        secondary = A11NotifSpec.findAlphaToMeetContrast(secondary, base, 4.5d);
+                    }
+                    a11Primary = primary;
+                    a11Secondary = secondary;
+                    a11CardBg = base;
+                    accent = fg;
+                    GradientDrawable g = new GradientDrawable();
+                    // A11 的行背景还是 9-patch：framework-res 与 SystemUI 资源表里
+                    // dimen/notification_corner_radius 命中数都是 0（圆角是 A12 才加的）⇒ 半径 0
+                    g.setCornerRadius(0f);
+                    g.setColor(base);
+                    newBg = g;
+                    Log.i(TAG, "a11 palette state=" + (expanded ? "expanded" : "collapsed")
+                            + " bg=" + Integer.toHexString(base)
+                            + " fg=" + Integer.toHexString(fg)
+                            + " primary=" + Integer.toHexString(a11Primary)
+                            + " secondary=" + Integer.toHexString(a11Secondary)
+                            + " colorized=" + (colorized ? 1 : 0)
+                            + " session=" + (hasSession ? 1 : 0)
+                            + " contrast=" + String.format(java.util.Locale.US, "%.2f",
+                                    A11Palette.contrast(a11Primary, base))
+                            + " artwork=" + (src != null)
+                            + " art=" + artSize(src)
+                            // 取色输入到底是哪一份图：用户报"切歌后左边还是上一首"，
+                            // 来源字段就是那条能证伪它的证据
+                            + " srcFrom=" + (bmp != null ? "argb" : artFrom)
+                            // srcHash = 真正被采样那张图的指纹；metaTitle = 会话此刻的曲名。
+                            // 三个一起看才能分清"图旧"还是"事件旧"：曲名已经新一首而
+                            // srcHash 还是上一首那个值，就是**采到的图本身滞后**（用户报的现象）
+                            + " srcHash=" + Integer.toHexString(h)
+                            + " metaTitle=" + metaTitleForLog()
+                            + " gridBg=" + artGrid(src, 0)
+                            + " gridFg=" + artGrid(src, 1)
+                            // 曲名放**行尾**：歌名里一定有空格，中间字段会把正则截断
+                            + " track=" + (title.getText() == null ? "-"
+                                    : title.getText().toString()));
+                } else if (m3) {
                     float hue = dominantHue(src);
                     int bg1 = hsv(hue, night ? 0.18f : 0.22f, night ? 0.20f : 0.99f);
                     int bg2 = hsv(hue, night ? 0.24f : 0.30f, night ? 0.16f : 0.955f);
@@ -1540,7 +2313,77 @@ public final class MediaCardFeature extends Feature {
                     card.setBackground(newBg);
                 }
                 curBg = newBg;
-                if (m3) {
+                if (a11) {
+                    // §15-7 `updateSeekBarTint` 原文：thumb / progress / track = **同一个** originalIconColor
+                    // 的 255 / 192 / 128 三档 alpha；§15-8 又证明着色时 originalIconColor == 正文主色。
+                    // 两枚时间也取这支颜色，total 额外叠一层用卡片底色做的阴影（原生只有这一处阴影）。
+                    int seekBase = a11Primary;
+                    // alpha 与 QS 播放器的 media_seekbar_progress(#c0ffffff)/media_disabled(#80ffffff)
+                    // 完全同值，只是基色换成取色链算出的主文字色：卡片底色可能很浅，白阶会看不见
+                    seekDrawable.setColors(A11NotifSpec.seekTrackColor(seekBase),
+                            A11NotifSpec.seekProgressColor(seekBase));
+                    // 3dp 来自 notification_material_media_seekbar.xml 的 android:maxHeight（§15-6）。
+                    // 以前记成"借 QS 的 qs_media_enabled_seekbar_height"：数值一样、出处不同，现已更正。
+                    seekDrawable.setTrackThicknessDp(A11NotifSpec.SEEK_TRACK_DP);
+                    // A11 的已读部分与轨道同厚（不是 iOS 那款 10dp 粗胶囊）
+                    seekDrawable.uniformFill = true;
+                    // 滑块要看得见（A11 样式带来的实心圆）；不可拖时靠 alpha=0 让它消失
+                    bar.setThumb(thumb(ctx, A11NotifSpec.seekThumbColor(seekBase), true));
+                    total.setShadowLayer(A11NotifSpec.SEEK_TIME_SHADOW_RADIUS,
+                            A11NotifSpec.SEEK_TIME_SHADOW_DX, A11NotifSpec.SEEK_TIME_SHADOW_DY, a11CardBg);
+                    elapsed.setShadowLayer(0f, 0f, 0f, 0);
+                    if (playBtn != null) {
+                        playBtn.setBackground(null);
+                        // A11：着色时动作按钮 = getPrimaryTextColor(p)，与标题同色（§5b/§15-8）
+                        playBtn.setColorFilter(A11NotifSpec.actionIconTint(
+                                true, a11Primary, a11Primary));
+                    }
+                    title.setTextColor(a11Primary);
+                    artist.setTextColor(a11Secondary);
+                    elapsed.setTextColor(seekBase);
+                    total.setTextColor(seekBase);
+                    if (a11HeaderName != null) {
+                        a11HeaderName.setTextColor(a11Secondary);
+                    }
+                    // 刚换过 thumb，把"可不可拖"的状态按 A11 的判据补回去（§15-7 setScrubberVisible）
+                    reclaimBar();
+                    // 见证读的是**施加之后的真实画笔/视图状态**，不是实现里再算一遍同一个表达式：
+                    // 断言才有信息量（prog=primary@192、track=primary@128、thumb 随 canSeek 开合、
+                    // total 带底色阴影而 elapsed 不带）
+                    Drawable applied = bar.getThumb();
+                    // 只读 alpha 会被"颜色全透明的占位"骗过去（之前就是这么漏的）：
+                    // 现在把 drawable 自己的颜色和内在尺寸一起读回来。
+                    // 用 if 而不是三元式：本机 android.jar 里 getColor() 的返回类型与
+                    // null / 0 配起来都会撞上"三元式类型不兼容"（两次编译都栽在这儿）。
+                    int thumbColor = 0;
+                    if (applied instanceof GradientDrawable) {
+                        // GradientDrawable.getColor() 返回的是 ColorStateList（可空），
+                        // 取默认色即可：透明占位的那一颗默认色 alpha=0
+                        android.content.res.ColorStateList csl =
+                                ((GradientDrawable) applied).getColor();
+                        thumbColor = csl == null ? 0 : csl.getDefaultColor();
+                    }
+                    Log.i(TAG, "a11 seek prog=" + Integer.toHexString(seekDrawable.fillPaint.getColor())
+                            + " track=" + Integer.toHexString(seekDrawable.trackPaint.getColor())
+                            + " base=" + Integer.toHexString(a11Primary)
+                            + " thumbAlpha=" + (applied == null ? -1 : applied.getAlpha())
+                            + " thumbColor=" + Integer.toHexString(thumbColor)
+                            + " thumbPx=" + (applied == null ? -1 : applied.getIntrinsicWidth())
+                            + " uniformFill=" + (seekDrawable.uniformFill ? 1 : 0)
+                            + " barEnabled=" + (bar.isEnabled() ? 1 : 0)
+                            + " thicknessDp=" + seekDrawable.trackThicknessDp
+                            + " totalShadow=" + (total.getShadowRadius() > 0f ? 1 : 0)
+                            + " totalShadowColor="
+                            + Integer.toHexString(total.getShadowColor())
+                            // 两枚时间**读回自己画笔上的色**：用户报"右边那枚在黑底上没反色、看不清"，
+                            // 只看实现里赋的变量证明不了屏幕上那一份是什么色
+                            + " elapsedColor=" + Integer.toHexString(elapsed.getCurrentTextColor())
+                            + " totalColor=" + Integer.toHexString(total.getCurrentTextColor())
+                            + " elapsedShadow=" + (elapsed.getShadowRadius() > 0f ? 1 : 0));
+                    // 底色变了就必须重做封面浮雕（右缘淡出的终点 = 卡片底色），
+                    // 否则"换歌 / 切深浅色"之后那条边会露出硬界（11-04 早上的反馈）。
+                    syncArt();
+                } else if (m3) {
                     int barFill = accent;
                     int trackColor = Color.argb(night ? 0x33 : 0x2E,
                             Color.red(accent), Color.green(accent), Color.blue(accent));
@@ -1579,7 +2422,7 @@ public final class MediaCardFeature extends Feature {
                     elapsed.setTextColor(secondary);
                     total.setTextColor(secondary);
                 }
-                lastArtHash = h;
+                lastArtKey = artKey;
             } catch (Throwable t) {
                 Log.w(TAG, "applyPalette failed", t);
             }
@@ -1625,33 +2468,104 @@ public final class MediaCardFeature extends Feature {
             }
         }
 
+        /** 我们上一次真正贴到封面上的那张（不是 artView 当前值，那可能还是过渡包装） */
+        Drawable lastAppliedArt;
+
+        /**
+         * 封面换图的过渡。A11 原生是硬切，用户 11-04 明确要淡入淡出：
+         * 手上还有一张就交叉淡（旧图→新图），空窗后第一张到达就 alpha 0→1 淡入，
+         * 两种都不再"啪"地蹦出来。时长走 `A11NotifSpec.ART_FADE_MS`（产品取向，非逆向值）。
+         */
+        void applyArtSwap(Drawable prev, Drawable next, boolean animated) {
+            try {
+                if (!animated) {
+                    // 同一张图只是按新底色重染左边那层色调：直接替换。再淡一次会把正在跑的
+                    // 过渡重启，用户看到的就是"旧封面突然消失"那种硬跳（11-04 午后的实测）
+                    artView.animate().cancel();
+                    artView.setAlpha(1f);
+                    artView.setImageDrawable(next);
+                    Log.i(TAG, "a11 art fade mode=retint");
+                    return;
+                }
+                if (prev != null) {
+                    TransitionDrawable td =
+                            new TransitionDrawable(new Drawable[]{prev, next});
+                    // 与卡片背景那次过渡同一套调用（startFade 在本机 android.jar 里没有）
+                    td.setCrossFadeEnabled(true);
+                    artView.setImageDrawable(td);
+                    td.startTransition(A11NotifSpec.ART_FADE_MS);
+                    Log.i(TAG, "a11 art fade mode=cross ms=" + A11NotifSpec.ART_FADE_MS);
+                    return;
+                }
+                artView.setAlpha(0f);
+                artView.setImageDrawable(next);
+                artView.animate().alpha(1f).setDuration(A11NotifSpec.ART_FADE_MS).start();
+                Log.i(TAG, "a11 art fade mode=in ms=" + A11NotifSpec.ART_FADE_MS);
+            } catch (Throwable t) {
+                // 过渡失败也必须把图画上，宁可硬切不要空白
+                artView.setAlpha(1f);
+                artView.setImageDrawable(next);
+            }
+        }
+
         void syncArt() {
             hideRowBackground();
             try {
                 if (art != null) {
                     art.setVisibility(View.GONE);
                 }
-                Bitmap meta = controller != null ? metadataArt(controller.getMetadata()) : null;
-                int h;
-                Drawable d;
-                if (meta != null) {
-                    h = artHash(meta);
-                    d = null;
-                } else if (art != null) {
-                    d = art.getDrawable();
-                    h = artHash(viewArtBitmap(art));
-                } else {
+                // 与取色同一个来源解析（通知自带 largeIcon 优先，metadata 兜底）
+                Bitmap pick = artSource();
+                int h = artHash(pick);
+                // 缓存键含底色：A11 的"封面右缘淡出进底色"要求浮雕底色 == 卡片底色，
+                // 只按封面 hash 去重会让"换歌/换深浅色后底色变了"的那一轮仍然拿着旧底色，
+                // 右边淡出的终点和卡片对不上 ⇒ 用户看到的就是一条硬边（11-04 早上就是这个反馈）。
+                int reliefBg = a11CardBg == 0 ? A11NotifSpec.CARD_BG_LIGHT : a11CardBg;
+                if (h == 0) {
+                    // 这一帧**没有**封面来源。以前会拿留存的 `a11RawArt` 继续染一张贴上去，
+                    // 于是切歌空窗期屏幕上就是上一首歌（用户报的那条）。现在清空，
+                    // 等 bind / metadata / 封面图换了再画。
+                    if (lastDrawableHash != 0) {
+                        artView.setImageDrawable(null);
+                        lastAppliedArt = null;
+                        lastDrawableHash = 0;
+                        Log.i(TAG, "a11 art cleared why=no-source " + artFrom);
+                    }
                     return;
                 }
-                if (h == 0 || h == lastDrawableHash) {
+                if (h == lastDrawableHash && reliefBg == a11ReliefBg) {
                     return;
                 }
-                if (meta != null) {
-                    d = new BitmapDrawable(root.getResources(), meta);
+                // 只有**封面真的换了**才做淡入淡出；同一张图因底色变化重染时直接替换 ——
+                // 那种情况下画面差异只是左边那层色调，重启一次淡入反而看得更跳
+                boolean animated = h != lastDrawableHash;
+                Drawable prevArt = lastAppliedArt;
+                Drawable d = new BitmapDrawable(root.getResources(), pick);
+                if ("a11".equals(style)) {
+                    // A11 每有一张 largeIcon 就用 ImageGradientColorizer 换掉它（着色与否都会，
+                    // LOG-1103 §3-4 最后一条）：左边是底色浮雕，向右逐渐露出真封面。
+                    Bitmap relief = A11ArtRelief.colorize(pick, reliefBg,
+                            root.getLayoutDirection() == View.LAYOUT_DIRECTION_RTL);
+                    if (relief != null) {
+                        d = new BitmapDrawable(root.getResources(), relief);
+                        Log.i(TAG, "a11 art relief side=" + relief.getWidth() + "x"
+                                + relief.getHeight() + " src="
+                                + pick.getWidth() + "x" + pick.getHeight()
+                                + " hash=" + Integer.toHexString(h)
+                                + " color=" + Integer.toHexString(reliefBg)
+                                + " from=" + artFrom
+                                + " rtl=" + (root.getLayoutDirection()
+                                        == View.LAYOUT_DIRECTION_RTL ? 1 : 0));
+                    }
                 }
-                if (d != null) {
-                    artView.setImageDrawable(d);
-                    lastDrawableHash = h;
+                a11RawArt = pick;
+                applyArtSwap(animated ? prevArt : null, d, animated);
+                lastAppliedArt = d;
+                lastDrawableHash = h;
+                a11ReliefBg = reliefBg;
+                if (art != null && "a11".equals(style)) {
+                    // 挂在这里而不是只挂在建卡那一次：换歌的重新应用发生在绑定之后
+                    guardArtHidden(art);
                 }
             } catch (Throwable t) {
                 Log.w(TAG, "syncArt failed", t);
@@ -1690,11 +2604,18 @@ public final class MediaCardFeature extends Feature {
                     + " widget=" + widgetSeekAvailable() + " actions=" + actions
                     + " barAt=" + bl[0] + ',' + bl[1] + 'x' + bar.getWidth() + 'x' + bar.getHeight());
             bar.setEnabled(seekable);
-            if (seekable) {
+            if ("a11".equals(style)) {
+                // A11 的 setScrubberVisible（§15-7）：不可 seek 只把 **thumb 调透明** + setEnabled(false)，
+                // 轨道和两枚时间照常满强度显示。原来把整条 bar 压到 0.85 是自创的"变暗"，原生没有。
+                // 播放器样式：thumb 常驻可见（通知卡那一版才会把它调透明），
+                // 不可拖只 setEnabled(false) + 吞掉手势，条与时间满强度
+                bar.setAlpha(1f);
+                bar.setOnTouchListener(seekable ? null : CONSUME_TOUCH);
+            } else if (seekable) {
                 bar.setOnTouchListener(null);
                 bar.setAlpha(1f);
             } else {
-                bar.setOnTouchListener((v, event) -> true);
+                bar.setOnTouchListener(CONSUME_TOUCH);
                 bar.setAlpha(0.85f);
             }
         }
@@ -1721,12 +2642,10 @@ public final class MediaCardFeature extends Feature {
                 if (!key.isEmpty() && key.equals(lastTrackKey)) {
                     return;
                 }
-                Bitmap src = metadataArt(md);
-                if (src == null) {
-                    src = viewArtBitmap(art);
-                }
+                Bitmap src = artSource();
                 if (src == null && curBg != null) {
-                    lastTrackKey = key;
+                    // 没有封面就不动色，但**别把这一首歌的 key 记成"已处理"**：
+                    // 记了就等于"后来封面到了也不再取色"，用户看到的正是停在上一首的底色
                     return;
                 }
                 Log.i(TAG, "track changed, retinting: " + key);
@@ -1741,6 +2660,14 @@ public final class MediaCardFeature extends Feature {
             final Paint trackPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
             final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
             final float density;
+            float trackThicknessDp = 4f;
+            /**
+             * 进度部分是否与轨道同厚。A11 的两个媒体模板（framework 的
+             * `notification_material_media_seekbar` 与设备那支 `vigour_media_seekbar`）都只写
+             * `android:maxHeight=3dp`，形状由 progress drawable 自己出 ⇒ 已读部分是**细线**；
+             * 而 iOS/OS5 那一款是 10dp 粗胶囊。默认 false 保持老样，a11 显式打开。
+             */
+            boolean uniformFill;
             int baseTrack;
             int baseFill;
             int mDraws;
@@ -1756,6 +2683,11 @@ public final class MediaCardFeature extends Feature {
             void applyColors() {
                 trackPaint.setColor(baseTrack);
                 fillPaint.setColor(baseFill);
+            }
+
+            void setTrackThicknessDp(float v) {
+                trackThicknessDp = v;
+                invalidateSelf();
             }
 
             void setColors(int trackColor, int fillColor) {
@@ -1778,8 +2710,10 @@ public final class MediaCardFeature extends Feature {
                 if (b.width() <= 0 || b.height() <= 0) {
                     return;
                 }
-                float trackH = Math.min(density * 4f, b.height());
-                float fillH = Math.min(density * 10f, b.height());
+                float trackH = Math.min(density * trackThicknessDp, b.height());
+                // A11：已读部分与轨道同厚（两端圆头自然接成一条圆头细线）；
+                // iOS/OS5：已读部分是 10dp 粗胶囊，余轨是细线 —— 这个差别就是用户说的"不像 A11"。
+                float fillH = uniformFill ? trackH : Math.min(density * 10f, b.height());
                 float cy = b.centerY();
                 RectF track = new RectF(b.left, cy - trackH / 2f, b.right, cy + trackH / 2f);
                 canvas.drawRoundRect(track, trackH / 2f, trackH / 2f, trackPaint);
@@ -1838,11 +2772,28 @@ public final class MediaCardFeature extends Feature {
             return ld;
         }
 
+        /**
+         * 进度条滑块。
+         *
+         * `visible=false` 是 iOS/OS5 那一款：留一颗 10dp 的**全透明**占位（只撑触摸热区，看不见）。
+         * a11 要走 `visible=true`：A11 那两个媒体模板都没写 `android:thumb`，滑块来自样式，
+         * 是看得见的实心圆 —— 之前一律用透明占位，所以 A11 样式下"没有滑块"，
+         * 而见证只读 drawable 的 alpha（透明色也报 255）完全看不出来，这次一并补上。
+         */
         private static Drawable thumb(Context ctx, int accent) {
+            return thumb(ctx, accent, false);
+        }
+
+        private static int lastThumbSizePx;
+
+        private static Drawable thumb(Context ctx, int accent, boolean visible) {
             GradientDrawable d = new GradientDrawable();
             d.setShape(GradientDrawable.OVAL);
-            d.setColor(0x00000000);
-            d.setSize(dp(ctx, 10), dp(ctx, 10));
+            // 颜色带上 accent 的 alpha：可拖时 255、不可拖时 A11 也是靠 alpha 让它消失
+            d.setColor(visible ? accent : 0x00000000);
+            int size = dp(ctx, 10);
+            lastThumbSizePx = visible ? size : 0;
+            d.setSize(size, size);
             return d;
         }
 
@@ -1852,7 +2803,29 @@ public final class MediaCardFeature extends Feature {
             if (controller == null) {
                 bindSession();
             }
-            startTicker();
+            updateProgress();
+            tickIfPlaying();
+            // 暂停状态下没有秒级定时器，所以绑定这一拍也要比对一次封面身份，
+            // 否则"暂停时切歌"这一类就没人重取色
+            watchArtArrival();
+        }
+
+        /**
+         * 只有**正在播放**才挂那个 1s 定时器（A11 也是这么做的：暂停的卡没有会动的东西）。
+         * 拖动中例外——拖完要等 `suppressUntil` 过去才回到会话位置，所以期间得继续走。
+         */
+        void tickIfPlaying() {
+            try {
+                PlaybackState st = controller == null ? null : controller.getPlaybackState();
+                boolean playing = st != null
+                        && st.getState() == PlaybackState.STATE_PLAYING;
+                if (playing || dragging) {
+                    startTicker();
+                } else {
+                    tickerRunning = false;
+                }
+            } catch (Throwable ignored) {
+            }
         }
 
         void bindSession() {
@@ -1911,6 +2884,58 @@ public final class MediaCardFeature extends Feature {
             }
         }
 
+        /** 会话此刻的曲名（只给见证用）：和 srcHash 一起看才知道"图旧"还是"事件旧"。 */
+        String metaTitleForLog() {
+            try {
+                MediaMetadata md = controller == null ? null : controller.getMetadata();
+                CharSequence t = md == null ? null : md.getDescription().getTitle();
+                return t == null ? "-" : t.toString();
+            } catch (Throwable e) {
+                return "err";
+            }
+        }
+
+        /** 上一拍看到的封面 Drawable 身份；变了才重取色（比像素便宜，也不会把窗口闹得永不空闲）。 */
+        Drawable lastArtDrawableSeen;
+        /** 上一拍那张封面的指纹（零拷贝那条才算）：Drawable 实例被复用但内容换了也抓得住。 */
+        int lastArtHashSeen;
+
+        /**
+         * 通知把 largeIcon 换成新一首时，`art` 里的 Drawable 实例会变，而 bind / metadata 两个事件
+         * 都可能早于它到达（vivo 的会话 metadata 经常慢一拍）。这一路只做身份比较：
+         * 没变就一个调用都不发，变了才 syncArt()+refreshColors()。
+         */
+        void watchArtArrival() {
+            try {
+                Drawable d = art == null ? null : art.getDrawable();
+                // 只走零拷贝那条（BitmapDrawable）算指纹：非位图的那一类每秒栅格化太贵，
+                // 交给 Drawable 身份比较兜底
+                int h = artHash(viewArtBitmap(art));
+                if (d == lastArtDrawableSeen && h == lastArtHashSeen) {
+                    return;
+                }
+                boolean known = lastArtDrawableSeen != null || d == null;
+                lastArtDrawableSeen = d;
+                lastArtHashSeen = h;
+                Log.i(TAG, "art drawable changed now=" + (d == null ? "null"
+                        : d.getClass().getSimpleName()) + " hash=" + Integer.toHexString(h));
+                if (known) {
+                    // 换歌的真实顺序是：曲目事件先到、新一首的封面图**后**到（真机见证：
+                    // 取色时 srcHash=1a13df86，随后浮雕却拿到 hash=35f4616a）。
+                    // 此时 trackKey 已经是新一首，refreshColors 会在入口直接早退，
+                    // 于是左半底色永久停在上一首那张图的取色结果——正是用户报的现象。
+                    lastTrackKey = "";
+                }
+                // 顺序必须是**先取色、后画封面**：A11 的浮雕要用卡片底色做右缘淡出的终点，
+                // 反过来就会先拿旧底色画一张、320ms 淡入跑到一半又被新底色那张重启
+                // （真机见证：同一次切歌里 relief color=ffffffff → 24ms 后 color=ff103808，
+                // 两条 a11 art fade 相隔 24ms）——用户看到的"还是生硬切换"就是这个重启。
+                refreshColors(false);
+                syncArt();
+            } catch (Throwable ignored) {
+            }
+        }
+
         void startTicker() {
             if (tickerRunning) {
                 return;
@@ -1927,13 +2952,27 @@ public final class MediaCardFeature extends Feature {
          */
         void reclaimBar() {
             try {
-                float want = canSeek ? 1f : 0.85f;
+                boolean a11 = "a11".equals(style);
+                float want = (a11 || canSeek) ? 1f : 0.85f;
                 if (bar.getVisibility() != View.VISIBLE) {
                     Log.i(TAG, "card bar reclaimed visibility was " + bar.getVisibility());
                     bar.setVisibility(View.VISIBLE);
                 }
                 if (Math.abs(bar.getAlpha() - want) > 0.01f) {
                     bar.setAlpha(want);
+                }
+                if (a11) {
+                    // 按 A11 的判据把"可不可拖"这一对**一起**纠正（§15-7 setScrubberVisible）：
+                    // thumb 255⟺enabled、thumb 0⟺disabled。分开纠正会让见证抓到中间态（自相矛盾）。
+                    Drawable th = bar.getThumb();
+                    // thumb 常驻 255（播放器样式），不再随 canSeek 消失
+                    if (th != null && th.getAlpha() != A11NotifSpec.SEEK_THUMB_ALPHA) {
+                        th.setAlpha(A11NotifSpec.SEEK_THUMB_ALPHA);
+                    }
+                    if (bar.isEnabled() != canSeek) {
+                        bar.setEnabled(canSeek);
+                    }
+                    bar.setOnTouchListener(canSeek ? null : CONSUME_TOUCH);
                 }
             } catch (Throwable ignored) {
             }
@@ -1961,6 +3000,9 @@ public final class MediaCardFeature extends Feature {
                 PlaybackState st = controller.getPlaybackState();
                 long duration = md == null ? 0 : md.getLong(MediaMetadata.METADATA_KEY_DURATION);
                 long position = st == null ? 0 : st.getPosition();
+                // A11 的"时长未知就没有进度条"这条判据（§15-7）；只在值变了才会走日志/post
+                lastDurationMs = duration;
+                applyA11SeekVisibility();
                 if (st != null && st.getState() == PlaybackState.STATE_PLAYING) {
                     position += (long) ((SystemClock.elapsedRealtime() - st.getLastPositionUpdateTime())
                             * st.getPlaybackSpeed());
@@ -2009,7 +3051,9 @@ public final class MediaCardFeature extends Feature {
         if (ms < 0) {
             ms = 0;
         }
-        long sec = ms / 1000;
-        return String.format(Locale.US, "%d:%02d", sec / 60, sec % 60);
+        // A11 原文：`DateUtils.formatElapsedTime(ms / 1000)`（NotificationMediaTemplateViewWrapper
+        // .millisecondsToTimeString，LOG-1103 §15-7）。自己拼 "%d:%02d" 过了一小时会写成 "62:05"，
+        // 而系统写 "1:02:05" —— 复刻就别自创格式。
+        return android.text.format.DateUtils.formatElapsedTime(ms / 1000);
     }
 }

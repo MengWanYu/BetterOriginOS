@@ -1,0 +1,67 @@
+== 0) 前提复核：Y7s 实读取证（不连设备）==
+  ok   A11 取证核对: 25 通过 / 0 失败
+  ok   A11 取色网格与 A11 一致
+  ok   A11 取色选择逻辑与 androidx Target 模型一致
+  ok   A11 量化器与 ColorCutQuantizer 一致
+== 1) 环境前置 ==
+  sdk=33 mode=os3
+== 2) 切到 a11 风格并重启 SystemUI ==
+  ok   SystemUI pid=20311
+== 3) 起播并打开面板 ==
+== 4) 代码级断言（度量日志）==
+  ok   媒体行绑定钩子命中 6 次
+  ok   a11 风格 restyle 命中 2 次
+  ok   A11 取色链跑了 7 次
+  ok   a11 规格见证日志 2 条
+  ok   a11 封面几何见证 10 条
+  ok   radius: level=1 px=54.0
+  ok   radius: level=1 px=54.0
+  ok   radius: level=1 px=54.0
+  ok   radius: level=1 px=54.0
+  ok   radius: level=1 px=54.0
+  ok   g2: 回落普通圆角 w=0 h=54 r=27.0
+  ok   g2: 回落普通圆角 w=960 h=54 r=27.0
+  ok   g2: 回落普通圆角 w=960 h=108 r=54.0
+  ok   g2: 回落普通圆角 w=0 h=54 r=27.0
+  ok   g2: 回落普通圆角 w=960 h=54 r=27.0
+  ok   g2: 回落普通圆角 w=960 h=108 r=54.0
+  ok   shelf: topRoundness 读回 1.000
+  ok   shelf: topRoundness 读回 1.000
+  ok   shelf: topRoundness 读回 1.000
+  ok   shelf: topRoundness 读回 1.000
+  ok   shelfgap: 施加：0.0 -> 21.0（+21px，原生基线）
+  ok   shelfgap: 施加：0.0 -> 21.0（+21px，原生基线）
+  ok   shelfgap: 幂等：21.0 已是上次写出的位置，回退基线 0.0 后仍落在 21.0
+  ok   shelfgap: 幂等：21.0 已是上次写出的位置，回退基线 0.0 后仍落在 21.0
+  ok   shelfgap: 幂等：21.0 已是上次写出的位置，回退基线 0.0 后仍落在 21.0
+  ok   shelfgap: 幂等：21.0 已是上次写出的位置，回退基线 0.0 后仍落在 21.0
+  ok   clear: size=138.0 margin=120.0 nav=False shade=isExpanded qs=isQsFullScreen host=NotificationPanelView
+  ok   clear: size=138.0 margin=120.0 nav=False shade=isExpanded qs=isQsFullScreen host=NotificationPanelView
+  ok   a11spec: btn=144/144 pad=24 end=6 src=48 radius=0（宿主对照 6）
+  ok   a11spec: btn=144/144 pad=24 end=6 src=48 radius=0（宿主对照 6）
+  ok   art: expanded size=249=contentH clip=false title=42px subtext=36px medium=1
+  ok   art: expanded size=249=contentH clip=false title=42px subtext=36px medium=1
+  ok   art: expanded size=426=contentH clip=false title=42px subtext=36px medium=1
+  ok   art: collapsed size=249=contentH clip=false title=42px subtext=36px medium=1
+  ok   art: collapsed size=696=contentH clip=false title=42px subtext=36px medium=1
+  ok   art: expanded size=249=contentH clip=false title=42px subtext=36px medium=1
+  ok   art: expanded size=696=contentH clip=false title=42px subtext=36px medium=1
+  ok   a11: collapsed bg=%ffffffff primary=%ff000000 secondary=%ff4d4d4d contrast=21.00 grid=0/0
+  ok   a11: expanded bg=%ffffffff primary=%ff000000 secondary=%ff4d4d4d contrast=21.00 grid=10368/12528
+  ok   a11: expanded bg=%ffffffff primary=%ff000000 secondary=%ff4d4d4d contrast=21.00 grid=0/0
+  ok   a11: collapsed bg=%ffffffff primary=%ff000000 secondary=%ff4d4d4d contrast=21.00 grid=0/0
+  ok   a11: collapsed bg=%ffd8d8c8 primary=%ff000000 secondary=%ff4d4d4d contrast=14.58 grid=10368/12528
+  ok   a11: expanded bg=%ffffffff primary=%ff000000 secondary=%ff4d4d4d contrast=21.00 grid=0/0
+  ok   a11: expanded bg=%ffd8d8c8 primary=%ff000000 secondary=%ff4d4d4d contrast=14.58 grid=10368/12528
+  ok   relief: side=144 src=144x144 color=%ffffffff rtl=0
+  FAIL 格式漂移: 有 10 行「a11 art state」但只解析出 7 条 —— 断言在静默少跑
+C:/Users/Administrator/Desktop/Aiqooz8-os5-mod/work/z8os3-live/a11-card-os3.log: 有失败（density=3.00，40 条通过 / 1 条失败）
+  FAIL verify_os5_mirror.py 有失败项（见 /c/Users/Administrator/Desktop/Aiqooz8-os5-mod/work/z8os3-live/a11-card-os3.log）
+== 4b) 另一条线的非干扰断言（OS5 复刻 × A11 卡）==
+  ok   A13 上复刻钩子已装（×2）
+     sep=os5（本门禁不改它）：跳过挂载负对照
+  ok   无致命异常
+  ok   全程 SystemUI pid 不变（20311）
+== 5) 收尾 ==
+A11 卡片冒烟：失败 1 条
+ - verify_os5_mirror.py 有失败项（见 /c/Users/Administrator/Desktop/Aiqooz8-os5-mod/work/z8os3-live/a11-card-os3.log）

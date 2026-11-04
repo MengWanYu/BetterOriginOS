@@ -1,0 +1,19 @@
+N: android=http://schemas.android.com/apk/res/android (line=18)
+  E: ImageButton (line=18)
+    A: http://schemas.android.com/apk/res/android:textSize(0x01010095)=17.000000dp
+    A: http://schemas.android.com/apk/res/android:textColor(0x01010098)=#ff2999f9
+    A: http://schemas.android.com/apk/res/android:ellipsize(0x010100ab)=3
+    A: http://schemas.android.com/apk/res/android:gravity(0x010100af)=0x00000011
+    A: http://schemas.android.com/apk/res/android:background(0x010100d4)=@0x0106000d
+    A: http://schemas.android.com/apk/res/android:paddingTop(0x010100d7)=8.000000dp
+    A: http://schemas.android.com/apk/res/android:paddingBottom(0x010100d9)=8.000000dp
+    A: http://schemas.android.com/apk/res/android:layout_width(0x010100f4)=36.000000dp
+    A: http://schemas.android.com/apk/res/android:layout_height(0x010100f5)=40.000000dp
+    A: http://schemas.android.com/apk/res/android:scaleType(0x0101011d)=7
+    A: http://schemas.android.com/apk/res/android:singleLine(0x0101015d)=true
+    A: http://schemas.android.com/apk/res/android:textAllCaps(0x0101038c)=false
+    A: http://schemas.android.com/apk/res/android:paddingStart(0x010103b3)=6.000000dp
+    A: http://schemas.android.com/apk/res/android:paddingEnd(0x010103b4)=6.000000dp
+    A: http://schemas.android.com/apk/res/android:layout_marginStart(0x010103b5)=2.000000dp
+    A: http://schemas.android.com/apk/res/android:layout_marginEnd(0x010103b6)=2.000000dp
+    A: style=?0x0101032b

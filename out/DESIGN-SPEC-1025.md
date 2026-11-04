@@ -78,6 +78,40 @@ BetterOriginOS（MainActivity，底栏双页）
 - 应用列表采用**行级圆角**：`bg_item_top`（上 12dp）/`bg_item_mid`（直角）/`bg_item_bot`（下 12dp），组内行间 1dp 发丝分隔线（左内缩 70dp），组间 8dp 透明间隔行（ListView 无 item margin，用 spacer 行实现）。
 - 功能卡是**整卡**（`bg_card`），卡内选项用分隔线。
 
+### 3.4 通知观感（OS5 基准，移植到 OS3 用同一套）
+
+数值全部逆向自本机 OS5 SystemUI，实现落在 `feature/notify/Os5Mirror`，常量表在 `Os5Geometry`/`Os5Mirror`：
+
+| Token | 值 | 来源 / 作用 |
+|---|---|---|
+| 半径档位 | 0→12dp、1→18dp、2/3→24dp | `VivoColorAndCornerPicker.getNotificationDefFillet`；写进 A13 的 `ExpandableOutlineView.mOutlineRadius` |
+| 圆角形状 | vivo G2 连续角 | `G2CornerUtil`：门限 **2.2r**；`>2.6r` 用 `-0.013r/0.61r/1.3r`，`2.2~2.6r` 用 `-0.008r/0.4r/1.1r`；弧 205/295/25/115 各扫 40° |
+| 通知间距 | 7dp | OS5 收纳栏/列表间隔（A13 原生是 0） |
+| 收纳栏圆角 | 顶 + 底都圆（`requestRoundness(1,1)` 语义） | A13 原生只圆底，`setTopRoundness(1.0f,false)` 补 |
+| 一键清除按钮 | 46dp 圆形、内边距 2dp、底边距 40dp（导航条**此刻可见**时 62dp） | 类：`com.vivo.systemui.statusbar.ui.NotificationClearAllImageView`（A15 命中 6、**A13 三个 dex 全 0**）⇒ A13 补挂一枚，图标随模块打包（`bo_ic_clear_all_os5.xml` 与 OS5 逐字节一致）；**先探测该类存在再决定补挂**，系统已有就整段跳过，避免 OS5 上长出第二枚。数值实值用 `aapt dump --values resources` 读（size/padding/margin_bottom/margin_bottom_with_navigationbar = 46/2/40/62dp；A13 里这些名字命中 0 ⇒ 必须打包）。40↔62 的分支 OS5 看 `CentralSurfaces.isNavigationBarVisible()`（手势 hint bar 也算可见），并在配置变更时重算 ⇒ 模块用 `getInsets(Type.navigationBars())` 非零复刻（兜底 `config_showNavigationBar`），日志 `navSrc=insets\|config`。**宿主必须是 `NotificationPanelView`**：A13 的 NSSL 父层 `NotificationsQuickSettingsContainer` 是 ConstraintLayout，会吞掉 `FrameLayout` 的 gravity |
+| 按钮阴影 | `#1AEEEEEE` + `BlurMaskFilter(45f, OUTER)` | 同上 |
+| 按压/出现 | 200ms / 150ms，`PathInterpolator(0.25,0.45,0.3,1)` | OS5 四处动画同一曲线；**清除时的整栏消失由系统自己播**（`updateShelfWhenDismissAll→animateShelfDisappear`，两版逐参数相同、且带 `mClearAllInProgress` 与 `z=!hasUnClearableNotifications` 两道门），模块不补播 |
+| 内联文字按钮 | A13 按 OS5 写成 `GONE(8)` | 不只是去装饰：`changeShelfVisibility(z)` 用 `(z && 内联==8)` 决定收纳栏收不收，A13 原生 `setDismissVisible` 是 `z?0:8`，会把栏顶住不收 |
+| 显隐闸门 | `shouldShowClearAll && 面板已展开 && 非 QS 全屏 && 未锁屏` | A13 用 `isExpanded()` 退路 + 公开 API `KeyguardManager.isKeyguardLocked()` |
+
+选项：`通知条美化 → 分割方式 sep = 关闭（本机原生）/ OS5 复刻`，**只在 A13 出现**（A15 原生就是这套，不必复刻）。
+
+### 3.5 Android 11（OriginOS Ocean）音乐卡规格
+
+`feature/media/A11MediaSpec`，OS3 与 OS5 共用同一 `a11` 样式；数值取自 Y7s 的 `framework-res.apk`/`SystemUI.apk` 资源表（不是目测）：
+
+| Token | 值 | 实读出处 |
+|---|---|---|
+| 展开态封面 | 52dp，圆角 **2dp**（A11 主题常量，不跟宿主 `dialogCornerRadius`） | `dimen/qs_media_album_size`、`Theme.DeviceDefault → config_dialogCornerRadius=2dp` |
+| 收起态封面 | 36dp，`CENTER` 不裁剪 | `dimen/notification_right_icon_size` |
+| 五枚控制键 | 48/48/**52**/48/48dp（中间播放键） | `media_view.xml` 的 `MediaPlayer.Button` 排 |
+| 进度轨道 | 3dp（禁用态 1dp） | `qs_media_enabled/disabled_seekbar_height`（是 SeekBar 的 `maxHeight`） |
+| 白色阶 | 正文 `#FFFFFFFF`、副文 `#99FFFFFF`、已播放 `#C0FFFFFF`、轨道 `#80FFFFFF` | `color/media_secondary_text` 等 |
+| 展开态字号 | 标题 16sp medium、艺名/时间 14sp | 布局里 16sp 恰好 1 个节点、14sp 5 个 |
+| 收起态字号 | 标题 14sp `sans-serif-medium`、副文 12sp，动作带高 60dp | `TextAppearance.Material.Notification.Title` 链 |
+| 取色 | 收起=着色行（左半幅 dominant + 右 60% 反色相 + WCAG 4.5 校正）；展开=恒深卡（L 锁 25%、饱和 ×0.8）+ ±0.15 高光 | `MediaNotificationProcessor`、`MediaStyle.ensureColors`、`MediaDataManager` |
+| 无封面兜底 | 展开卡 `0xFF404040`（把白色继续送进同一条 HSL 变换） | `MediaDataManager.java:534-553` |
+
 ## 4. 组件规范
 
 | 组件 | 规范 |
@@ -141,6 +175,9 @@ com.betteroriginos
 │   ├── SuCommander.java                    su 队列/防抖/回执/待生效计数/读文件
 │   └── IconMapper.java                     图标与名称（直接取 APK 本身图标）
 ├── feature/media/MediaCardFeature.java     媒体卡引擎 + 真实预览渲染（离屏 build + MediaStore 发布）
+│     └ A11Palette / A11MediaSpec           A11 取色链（量化-选择-对比度校正）与规格常量
+├── feature/notify/NotifyRowFeature.java    通知条美化（含 sep=off/os5 开关，仅 A13 出现）
+│     └ Os5Mirror / Os5Geometry             OS5 通知几何移植：半径档位、G2 连续角、收纳栏、浮动一键清除
 ├── feature/picker/PickerAlbumsFeature.java 修复照片选择器相册白名单（scope: media module）
 ├── hook/MainHook.java                      薄入口
 └── ui
@@ -175,3 +212,24 @@ com.betteroriginos
 - ❌ 不在功能卡里堆叠超过 2 个选项；复杂配置放二级页。
 - ❌ 不引入第三方 UI 库（miuix 路线已评估：fan.miuix 依赖锁在 GitHub Packages，需要 token，暂缓）。
 - ❌ 不用底部大弹层做单选项选择（遮挡全局、观感突兀）。
+
+## 8. 验收：不看截图
+
+样式选项当前有两处会改变观感：媒体卡 `style = os5 / material / a11`（下拉带预览），
+通知条 `sep = off / os5`（仅 A13）。判定一律走可复跑的取证，不承认目测：
+
+- **一条命令跑完所有离线检查**：`bash work/offline-all.sh`（16 项）—— G2 逐指令比对与"翻符号/挪量级"负对照、
+  **浮钮几何判据自测**（`work/os5mirror-geom.sh` 被真机脚本 source，所以它自己也进离线门禁：
+  正例 + 左上角 / 上半屏 / 缺日志 / 读不到屏尺寸 / 日志字段漂移 五条必须红）、
+  A11 数学/交叉验证/**量化器 median-cut**/取色网格/**六族选择逻辑**（都反射跑模块自己的字节码 + 独立参考）、
+  验证器正反例自测、Y7s 实读取证核对、日志形状自检（正则锚点必须能在源码里找到对应日志串）。
+- **真机门禁**：`work/os3-smoke-os5mirror.sh`（A13：钩子命中数 + 落点自检 + 几何度量 +
+  按日志坐标 tap + 位置硬判据 + sep=off 负对照）、
+  `work/a11-card-gate.sh <序列号> <os3|os5>`（媒体卡度量 + 第 4b 步"两条线互不干扰"：
+  A15 上复刻钩子必须 0 次、A13 上必须 ≥1 次）、`work/os3-smoke-light.sh`、`work/os3-smoke.sh`（回归）。
+- **度量日志即断言**：`os5_mirror: radius level/px`、`g2 path`、`bg clip g2 r= bounds=`、
+  `shelf gap topRoundness`、`clear-all native=`、`clear-all attached size marginBottom nav navSrc navVis navH shade host=`、
+  `clear-all at x y w h`、`clear-all tap inlineListener inlineVis shelfVis`、
+  `a11 card spec … radius hostCorner`、`a11 palette expanded/collapsed … art gridBg gridFg contrast`，
+  由 `work/verify_os5_mirror.py` 按 dp×density 逐值判定（A13 与"系统自带圆钮"两套正例都要绿）。
+- 结论与踩坑同步写进 `out/DEVLOG.md` 与 `out/LOG-<日期>-*-ADAPT/RE.md`；跨版本改动先按版本关门（`OsProfile`）。

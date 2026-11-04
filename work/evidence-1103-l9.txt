@@ -1,0 +1,53 @@
+== 0) 取证对象 ==
+  apk sha256[:12]=158a4517cc47 density=3.0
+  ok   设备上的模块 APK 与本地构建一致（158a4517cc47）
+== 1) 起底：sep=os5 + verify=1 ==
+  FAIL idle: 没拿到 uiautomator dump
+     idle -> row-158a4517cc47-idle.{xml,log}
+== 2) 点开展开（症状①：所有大图标抖一下）==
+  FAIL expand: 没拿到 uiautomator dump
+     expand -> row-158a4517cc47-expand.{xml,log}
+== 3) 滚动 + 从收纳栏划回（症状②③：丢圆角、收纳栏闪烁）==
+  FAIL scroll: 没拿到 uiautomator dump
+     scroll -> row-158a4517cc47-scroll.{xml,log}
+== 4) 结果级验收（逐态）==
+  -- idle
+Traceback (most recent call last):
+  File "C:\Users\Administrator\Desktop\Aiqooz8-os5-mod\work\verify_row_layout.py", line 490, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "C:\Users\Administrator\Desktop\Aiqooz8-os5-mod\work\verify_row_layout.py", line 478, in main
+    xml_text = io.open(a.dump, encoding="utf-8", errors="replace").read()
+               ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:/Users/Administrator/Desktop/Aiqooz8-os5-mod/work/z8os3-live/row-158a4517cc47-idle.xml'
+  FAIL idle: verify_row_layout.py 有失败
+  -- expand
+Traceback (most recent call last):
+  File "C:\Users\Administrator\Desktop\Aiqooz8-os5-mod\work\verify_row_layout.py", line 490, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "C:\Users\Administrator\Desktop\Aiqooz8-os5-mod\work\verify_row_layout.py", line 478, in main
+    xml_text = io.open(a.dump, encoding="utf-8", errors="replace").read()
+               ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:/Users/Administrator/Desktop/Aiqooz8-os5-mod/work/z8os3-live/row-158a4517cc47-expand.xml'
+  FAIL expand: verify_row_layout.py 有失败
+  -- scroll
+Traceback (most recent call last):
+  File "C:\Users\Administrator\Desktop\Aiqooz8-os5-mod\work\verify_row_layout.py", line 490, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "C:\Users\Administrator\Desktop\Aiqooz8-os5-mod\work\verify_row_layout.py", line 478, in main
+    xml_text = io.open(a.dump, encoding="utf-8", errors="replace").read()
+               ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:/Users/Administrator/Desktop/Aiqooz8-os5-mod/work/z8os3-live/row-158a4517cc47-scroll.xml'
+  FAIL scroll: verify_row_layout.py 有失败
+== 5) 症状量化（同一批日志里的计数，不靠眼观）==
+     投递阶段：polish 行数=8 总次数=13 单行最多=2
+     展开手势阶段：polish 行数=0 总次数=0 单行最多=0
+  ok   展开手势窗口内每行最多 polish 一次（0 行/0 次）——症状①无重复指纹
+grep: /c/Users/Administrator/Desktop/Aiqooz8-os5-mod/work/z8os3-live/row-158a4517cc47-idle.xml: No such file or directory
+  FAIL 展开没发生（最高行 0 -> 0 px）：症状①这一轮没测到
+     滚动窗口：shelf 可见性跳变=1 次，shelf 圆角度量=6 次
+  ok   滚动期间收纳栏可见性基本没跳（1 次）
+== 6) 收尾 ==
+结果级取证：有失败（证据同上）

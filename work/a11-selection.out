@@ -1,0 +1,7 @@
+  ok   4 块 -> DOM=ffffffff/12000 V=- M=- BG=ffffffff/12000 FG=ff211e40
+  ok   4 块 -> DOM=fff0f0f0/9000 V=ff2f6fb0/300 M=- BG=ffef4444/5000 FG=ffef4444
+  ok   4 块 -> DOM=ff101010/12000 V=ff003cff/5000 M=- BG=ff003cff/5000 FG=ff003cff
+  ok   3 块 -> DOM=ffdddddd/12000 V=ff2f6fb0/400 M=- BG=ffdddddd/12000 FG=ff2f6fb0
+  ok   4 块 -> DOM=ff3366cc/6000 V=ff3366cc/6000 M=- BG=ff3366cc/6000 FG=ff3366cc
+  ok   2 块 -> DOM=ff123456/46 V=- M=- BG=ff123456/46 FG=ff123456
+A11 选择逻辑自检：全绿

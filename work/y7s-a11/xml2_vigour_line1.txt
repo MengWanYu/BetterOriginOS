@@ -1,0 +1,16 @@
+N: android=http://schemas.android.com/apk/res/android (line=18)
+  E: LinearLayout (line=18)
+    A: http://schemas.android.com/apk/res/android:orientation(0x010100c4)=0
+    A: http://schemas.android.com/apk/res/android:id(0x010100d0)=@0x01020344
+    A: http://schemas.android.com/apk/res/android:layout_width(0x010100f4)=-1
+    A: http://schemas.android.com/apk/res/android:layout_height(0x010100f5)=-2
+    A: http://schemas.android.com/apk/res/android:singleLine(0x0101015d)=true
+      E: TextView (line=25)
+        A: http://schemas.android.com/apk/res/android:textAppearance(0x01010034)=@0x030f00b5
+        A: http://schemas.android.com/apk/res/android:textStyle(0x01010097)=0x00000001
+        A: http://schemas.android.com/apk/res/android:ellipsize(0x010100ab)=3
+        A: http://schemas.android.com/apk/res/android:id(0x010100d0)=@0x01020016
+        A: http://schemas.android.com/apk/res/android:fadingEdge(0x010100df)=0x00001000
+        A: http://schemas.android.com/apk/res/android:layout_width(0x010100f4)=-2
+        A: http://schemas.android.com/apk/res/android:layout_height(0x010100f5)=-2
+        A: http://schemas.android.com/apk/res/android:singleLine(0x0101015d)=true

@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11（OriginOS Ocean）原生媒体卡的缩略预览：
+     恒深色底（computeBackgroundColor 把 HSL 亮度锁在 0.25）、52dp 圆角封面、
+     白系文字与 3dp 进度条（#c0ffffff 进度 / #80ffffff 轨道）。 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#3F403B" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+    <item
+        android:width="20dp"
+        android:height="20dp"
+        android:gravity="top|left"
+        android:left="8dp"
+        android:top="8dp">
+        <shape android:shape="rectangle">
+            <solid android:color="#66FFFFFF" />
+            <corners android:radius="4dp" />
+        </shape>
+    </item>
+    <item
+        android:width="34dp"
+        android:height="4dp"
+        android:gravity="top|left"
+        android:left="32dp"
+        android:top="9dp">
+        <shape android:shape="rectangle">
+            <solid android:color="#FFFFFFFF" />
+            <corners android:radius="2dp" />
+        </shape>
+    </item>
+    <item
+        android:width="24dp"
+        android:height="3dp"
+        android:gravity="top|left"
+        android:left="32dp"
+        android:top="17dp">
+        <shape android:shape="rectangle">
+            <solid android:color="#99FFFFFF" />
+            <corners android:radius="2dp" />
+        </shape>
+    </item>
+    <item
+        android:width="44dp"
+        android:height="3dp"
+        android:bottom="10dp"
+        android:gravity="bottom|left"
+        android:left="8dp">
+        <shape android:shape="rectangle">
+            <solid android:color="#80FFFFFF" />
+            <corners android:radius="2dp" />
+        </shape>
+    </item>
+    <item
+        android:width="22dp"
+        android:height="3dp"
+        android:bottom="10dp"
+        android:gravity="bottom|left"
+        android:left="8dp">
+        <shape android:shape="rectangle">
+            <solid android:color="#C0FFFFFF" />
+            <corners android:radius="2dp" />
+        </shape>
+    </item>
+</layer-list>

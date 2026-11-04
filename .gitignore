@@ -40,3 +40,13 @@ Thumbs.db
 
 # qoder chat artifacts
 .qoder/app/
+
+# ---- RE scratch：整包反编译产物（几百 MB 级，不进版本库）----
+work/tmp-re-os3-media/sysui-full/
+work/y7s-a11/jadx-proj/
+
+# ---- 可从 jar 重生的整包反汇编与框架 jar（单个上百 MB，不进版本库）----
+work/tmp-re-a11/a11-code-classes*.txt
+work/tmp-re-os5toos3/os3-code-classes*.txt
+work/fw-res/a1*-classes*-code.txt
+work/**/*.jar

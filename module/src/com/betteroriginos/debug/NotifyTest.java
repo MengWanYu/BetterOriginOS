@@ -265,6 +265,36 @@ public final class NotifyTest {
     }
 
     /**
+     * 收纳栏取证样本：一次投满 BULK_N 条普通通知，把列表撑到溢出，
+     * 制造"被挤进收纳栏的行"——症状②（划回来丢圆角）与症状③（滚动时收纳栏闪烁）
+     * 在没有收纳栏的那一屏根本测不到，缺这一步就会把"没测到"写成"没问题"。
+     */
+    public static final int BULK_N = 14;
+    private static final String PLATFORM_BULK = "betteroriginos_debug_bulk";
+    private static final int ID_BULK_BASE = 4280;
+
+    public static void postBulk(Context ctx) {
+        try {
+            NotificationManager nm = nm(ctx);
+            if (nm == null) {
+                return;
+            }
+            for (int i = 1; i <= BULK_N; i++) {
+                nm.notify(PLATFORM_BULK, ID_BULK_BASE + i, new Notification.Builder(ctx, CHANNEL)
+                        .setSmallIcon(R.drawable.ic_notify)
+                        .setContentTitle("收纳栏取证 " + i)
+                        .setContentText("第 " + i + " 条：划进收纳栏再划回来，圆角与间距必须还在")
+                        .setAutoCancel(true)
+                        .setShowWhen(true)
+                        .build());
+            }
+            Log.i(TAG, "debug bulk posted n=" + BULK_N);
+        } catch (Throwable t) {
+            Log.w(TAG, "debug bulk post failed", t);
+        }
+    }
+
+    /**
      * 跳转回归样本：同一 groupKey 下 3 条通知，各自 contentIntent 携带不同的
      * debug_open 标记 + autoCancel，另带动作按钮。点哪条胶囊就必须跳到哪条对应的标记，
      * 且该条自动消失——用来验证"堆叠展开后单条通知的跳转/自动清除"不再走组摘要语义。

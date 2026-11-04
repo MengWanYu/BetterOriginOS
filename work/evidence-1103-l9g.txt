@@ -1,0 +1,43 @@
+== 0) 取证对象 ==
+  apk sha256[:12]=a9ce0e72c4ea density=3.0
+  ok   设备上的模块 APK 与本地构建一致（a9ce0e72c4ea）
+== 1) 起底：sep=os5 + verify=1 ==
+  ok   header 文本列钩子已装载（top-line onLayout hits=1）
+  FAIL idle: 没拿到 uiautomator dump（ERROR: could not get idle state.）
+     idle -> row-a9ce0e72c4ea-idle.{xml,log}
+== 2) 点开展开（症状①：所有大图标抖一下）==
+  FAIL expand: 焦点不在通知面板（  mCurrentFocus=Window{734d01e u0 org.lsposed.manager/org.lsposed.manager.ui.activity.MainActivity}），这一帧作废
+     expand -> row-a9ce0e72c4ea-expand.{xml,log}
+== 3) 滚动 + 从收纳栏划回（症状②③：丢圆角、收纳栏闪烁）==
+  FAIL scroll: 没拿到 uiautomator dump（ERROR: could not get idle state.）
+     scroll -> row-a9ce0e72c4ea-scroll.{xml,log}
+== 4) 结果级验收（逐态）==
+  -- idle
+     （idle：无 dump，L1~L9 本轮未测，只判日志侧）
+usage: verify_row_layout.py [-h] [--dump DUMP] [--log LOG] [--density DENSITY]
+                            [--selftest]
+verify_row_layout.py: error: unrecognized arguments: --log-only
+  FAIL idle: verify_row_layout.py 有失败
+  -- expand
+  ok   R1~R5 逐位置圆角与背景四角一致（18 行）
+  ok   L10 实测时间落点全部 ≥66dp 列（2 条，+198..+198px；none 6 条）
+  FAIL dump 里没有任何 expandableNotificationRow（样本无效）
+  FAIL L11 col 早退原因后来没被实测补齐：why=no-cv line=b3ad9b1
+结果级验收：2 通过 / 2 失败
+  FAIL expand: verify_row_layout.py 有失败
+  -- scroll
+     （scroll：无 dump，L1~L9 本轮未测，只判日志侧）
+usage: verify_row_layout.py [-h] [--dump DUMP] [--log LOG] [--density DENSITY]
+                            [--selftest]
+verify_row_layout.py: error: unrecognized arguments: --log-only
+  FAIL scroll: verify_row_layout.py 有失败
+== 5) 症状量化（同一批日志里的计数，不靠眼观）==
+     投递阶段：polish 行数=2 总次数=6 单行最多=3
+     展开手势阶段：polish 行数=8 总次数=10 单行最多=2
+  FAIL 展开手势窗口内有行被 polish 2 次 —— 抖动回归
+grep: /c/Users/Administrator/Desktop/Aiqooz8-os5-mod/work/z8os3-live/row-a9ce0e72c4ea-idle.xml: No such file or directory
+  FAIL 展开没发生（最高行 0 -> 0 px）：症状①这一轮没测到
+     滚动窗口：shelf 可见性跳变=5 次，shelf 圆角度量=9 次
+  FAIL 滚动期间收纳栏可见性跳了 5 次 —— 闪烁回归（修复前实测 11 次）
+== 6) 收尾 ==
+结果级取证：有失败（证据同上）

@@ -47,9 +47,9 @@ case "$OS" in *"OriginOS 3"*) ;; *) fail "不是 OriginOS 3（$OS）" ;; esac
 echo "== 2) 切原生优化样式并重启 SystemUI =="
 VERIFY0=$(su_sh "settings get global betteroriginos_notify_verify"); [ "$VERIFY0" = "null" ] && VERIFY0=0
 su_sh "settings put global betteroriginos_feature_notify_row 1" >/dev/null
-su_sh "settings put global betteroriginos_notify_row_style light" >/dev/null
+# 样式键已随 iOS 卡移除：NotifyRowFeature.isLightStyle() 现在恒为 true，
+# 这个 settings 键没人读。原来这里"写下去再读回来"必然成立，是条自我满足的假断言，删掉。
 su_sh "settings put global betteroriginos_notify_verify 1" >/dev/null
-[ "$(su_sh 'settings get global betteroriginos_notify_row_style')" = "light" ] || fail "样式没切到 light"
 su_sh "logcat -c" >/dev/null
 restart_sysui || fail "SystemUI 重启失败"
 sleep 3

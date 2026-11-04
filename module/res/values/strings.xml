@@ -41,6 +41,7 @@
     <string name="option_style_summary">选择媒体卡的视觉风格</string>
     <string name="style_os5_title">OS5 原子随身听</string>
     <string name="style_m3_title">Material You</string>
+    <string name="style_a11_title">Android 11 原生卡（Ocean）</string>
     <string name="option_qs_seek_title">OS3 播放器磁贴进度条</string>
     <string name="option_qs_seek_summary">在控制中心播放器磁贴底部加一条可拖动进度条（OriginOS 3）</string>
 
@@ -73,4 +74,8 @@
     <string name="list_overlap_off">关闭（8dp 间隙）</string>
     <string name="list_overlap_6">轻微（6dp）</string>
     <string name="list_overlap_10">明显（10dp）</string>
+    <string name="option_sep_title">OS5 通知观感</string>
+    <string name="option_sep_summary">把 OS5 的通知几何移植到本机：连续角卡片、收纳栏间距与浮动一键清除（原生优化样式）</string>
+    <string name="sep_off">关闭（本机原生）</string>
+    <string name="sep_os5">OS5 复刻</string>
 </resources>

@@ -37,6 +37,12 @@ public final class NotifyRowSpec {
     public static final long STACK_ANIM_MS = 280;
 
     /**
+     * 组展开/收起时 42dp 大图标的淡入淡出时长。
+     * vivo 自己那段展开动画约 0.25s，图标比它略短才不会尾端还在淡、行已经停住。
+     */
+    public static final long ICON_FADE_MS = 170;
+
+    /**
      * iOS 式轻微回弹曲线：贝塞尔控制点让进度先过冲 ~8% 再回落到 1，
      * 视觉上是"弹一下再停住"，而不是线性/纯减速那种机械感。
      */

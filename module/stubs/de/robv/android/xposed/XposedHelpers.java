@@ -9,6 +9,10 @@ public final class XposedHelpers {
         throw new UnsupportedOperationException("stub");
     }
 
+    public static Class<?> findClassIfExists(String className, ClassLoader classLoader) {
+        throw new UnsupportedOperationException("stub");
+    }
+
     public static Object newInstance(Class<?> clazz, Object... args) {
         throw new UnsupportedOperationException("stub");
     }
@@ -35,6 +39,10 @@ public final class XposedHelpers {
     }
 
     public static boolean getBooleanField(Object obj, String fieldName) {
+        throw new UnsupportedOperationException("stub");
+    }
+
+    public static float getFloatField(Object obj, String fieldName) {
         throw new UnsupportedOperationException("stub");
     }
 

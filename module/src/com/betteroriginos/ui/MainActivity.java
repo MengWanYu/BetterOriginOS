@@ -112,6 +112,10 @@ public class MainActivity extends Activity {
             moveTaskToBack(true);
             new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(
                     () -> com.betteroriginos.debug.NotifyTest.postJump(this), 800);
+        } else if ("postbulk".equals(debugNotify)) {
+            moveTaskToBack(true);
+            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(
+                    () -> com.betteroriginos.debug.NotifyTest.postBulk(this), 800);
         } else if ("postswap".equals(debugNotify)) {
             com.betteroriginos.debug.NotifyTest.postSwap(this);
         } else if ("postconv".equals(debugNotify)) {

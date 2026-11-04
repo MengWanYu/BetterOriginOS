@@ -1,0 +1,68 @@
+SELFTEST: 正例通过（18 条断言）
+SELFTEST: 大字号正例通过（18 条断言；sp 字号跟 fontScale、14dp 的时间不跟）
+SELFTEST: OS5 正例通过（17 条断言）
+SELFTEST: 无圆角背景正例通过（18 条断言，radii-zero 不算我们的失效）
+SELFTEST: 反例「间距每帧累加」正确报红 -> shelfgap: yFrom=21.0 是我们上一帧刚写出的位置，却又当成原生基线加了 21px（prev 判定失效 → 每帧累加）
+SELFTEST: 反例「间距根本没施加」正确报红 -> shelfgap: yTo=0.0 != base(0.0)+want(21)，日志自相矛盾（读写字段不同源）
+SELFTEST: 反例「间距只剩幂等命中」正确报红 -> shelfgap: 没有一条从原生基线施加的帧（只有幂等命中 = 间距从没真施加过）
+SELFTEST: 反例「间距基线来源不明」正确报红 -> shelfgap: yFrom=100.0 既不是 base=0.0 也不是 base+want=21.0，位移来源不明
+SELFTEST: 反例「radius 档位算错」正确报红 -> radius: level=1 期望 54.0px 实得 36.0px
+SELFTEST: 反例「清除按钮尺寸错」正确报红 -> clear: 尺寸期望 138.0px 实得 100.0px
+SELFTEST: 反例「展开状态读不出来」正确报红 -> clear: 展开状态来源是 unavailable（应能读到原生 isExpanded）
+SELFTEST: 反例「QS 全屏闸门没生效」正确报红 -> clear: QS 全屏判定的来源是 unavailable（应读到原生 isQsFullScreen，否则快捷面板上会多一枚钮）
+SELFTEST: 反例「挂载日志没有 qs 字段（旧行形）」正确报红 -> 格式漂移: 有 1 行「clear-all attached」但只解析出 0 条 —— 断言在静默少跑
+SELFTEST: 反例「A11 按钮内缩不是 8dp」正确报红 -> a11spec: 按钮内缩 期望 8dp=24.0px 实得 16
+SELFTEST: 反例「A11 按钮串成 AOSP 那一支的 48dp」正确报红 -> a11spec: btnW 期望 36dp=108.0px 实得 144
+SELFTEST: 反例「A11 按钮高度不是 40dp」正确报红 -> a11spec: btnH 期望 40dp=120.0px 实得 144
+SELFTEST: 反例「A11 列上间距串成 AOSP 的 46dp」正确报红 -> a11spec: colTop 期望 42dp=126.0px 实得 138
+SELFTEST: 反例「A11 列边距串成 AOSP 的 16dp」正确报红 -> a11spec: colSide 期望 20dp=60.0px 实得 48
+SELFTEST: 反例「A11 列最小高串成 AOSP 的 39dp」正确报红 -> a11spec: colMinH 期望 61dp=183.0px 实得 117
+SELFTEST: 反例「A11 头部行高度不对」正确报红 -> a11spec: headH 期望 44dp=132.0px 实得 150
+SELFTEST: 反例「A11 动作带边距不对」正确报红 -> a11spec: actMarginStart 期望 14dp=42.0px 实得 30
+SELFTEST: 反例「A11 封面不再等于内容块高」正确报红 -> art(expanded): 封面不是正方形：size=180 contentH=255（A11 是**边长=内容列高**）
+SELFTEST: 反例「背景没有 G2 裁剪」正确报红 -> bgclip: 半径为 0（r=0.0）
+SELFTEST: 反例「背景裁剪回到平台格式化」正确报红 -> 格式漂移: 有 1 行「os5_mirror: bg clip g2」但只解析出 0 条 —— 断言在静默少跑
+SELFTEST: 反例「裁剪缺席且成因是反射失效」正确报红 -> bgclip: 没有裁剪行，且 skip 原因是 no-radii-field —— 这是我们这侧的反射/几何失效，不是系统没给圆角
+SELFTEST: 反例「裁剪缺席且没有任何见证」正确报红 -> bgclip: 没有 bg clip g2 日志，也没有 bg clip skipped 见证（onDraw 钩子没跑，或 verify 没开）
+SELFTEST: 反例「有半径但四角全直角」正确报红 -> bgclip: r=54.0 但四角全不是圆角 ['false', 'false', 'false', 'false'] —— 半径没写进去
+SELFTEST: 反例「A11 进度条轨道不是 3dp」正确报红 -> a11spec: trackDp 期望 3 实得 10
+SELFTEST: 反例「A11 标题字号不对」正确报红 -> art(expanded): titlePx 期望 42.0（14sp 跟 fontScale=1.0）实得 57; titlePx 与 spec 行不一致：art=57 spec=42（有半段用了旧值）
+SELFTEST: 反例「A11 封面又加了圆角裁剪」正确报红 -> art(expanded): clip=true：A11 的 right_icon 没有裁剪/圆角
+SELFTEST: 反例「A11 scaleType 退回 CENTER_INSIDE」正确报红 -> art(expanded): scaleType=CENTER_INSIDE，A11 两份模板写的都是 scaleType=6=**centerCrop**（§15-4）
+SELFTEST: 反例「A11 标题丢了强调字族」正确报红 -> art(expanded): 标题不是 sans-serif-medium（A11 line1 的字族是被强调那一族）
+SELFTEST: 反例「A11 圆角跟了宿主主题」正确报红 -> a11spec: radius 期望 0（A11 通知卡无圆角）实得 72，宿主对照 72
+SELFTEST: 反例「A11 圆角日志缺宿主对照」正确报红 -> 格式漂移: 有 1 行「a11 card spec」但只解析出 0 条 —— 断言在静默少跑
+SELFTEST: 反例「A11 取色网格回到旧实现」正确报红 -> a11(expanded): 取色网格 art=200x200 期望 bg=11250 fg=13500 实得 bg=20000 fg=22504（bg=左半幅、fg=右 60%，且先缩整图再换算 region）
+SELFTEST: 反例「A11 正文对比度不达标」正确报红 -> a11(expanded): contrast 字段=2.10 与实算 10.60 不一致（见证自说自话）
+SELFTEST: 反例「A11 对比度字段与实色不一致」正确报红 -> a11(expanded): contrast 字段=19.90 与实算 10.60 不一致（见证自说自话）
+SELFTEST: 反例「A11 副文被调淡」正确报红 -> a11(expanded): secondary 被调淡（alpha 107 < A11 起点 179）：findAlphaToMeetContrast 只会往上加
+SELFTEST: 反例「A11 未着色却用封面色当底」正确报红 -> a11(collapsed): 未着色时底色应为 notification_material_background_color（#ffffffff / 夜 black），实得 ff33404d; primary RGB 应为 FFFFFF（底色亮度决定用深字/浅字那一支），实得 ff000000; secondary RGB 应为 FFFFFF，实得 ff4d4d4d; contrast 字段=21.00 与实算 1.98 不一致（见证自说自话）; primary 对底色只有 1.98:1，A11 要求正文 ≥4.5; secondary 对底色只有 1.25:1，A11 要求正文 ≥4.5
+SELFTEST: 反例「A11 有会话却报未着色」正确报红 -> a11(expanded): session=1 但 colorized=0，与 A11 的 isColorizedMedia 相反; 未着色时底色应为 notification_material_background_color（#ffffffff / 夜 black），实得 ff33404d
+SELFTEST: 反例「A11 浮雕底色与卡片不一致」正确报红 -> relief: 浮雕用的底色 ff123456 不在本屏卡片底色里（ff33404d,ffffffff）
+SELFTEST: 反例「A11 浮雕输出不是正方形」正确报红 -> relief: 浮雕输出不是正方形 200x180
+SELFTEST: 反例「A11 浮雕边长不等于原图短边」正确报红 -> relief: 浮雕边长 250 不等于原图短边 200（A11 是居中裁方）
+SELFTEST: 反例「A11 进度条没降 alpha（progress 满不透明）」正确报红 -> seek: progress alpha 期望 192（A11 withAlpha）实得 255
+SELFTEST: 反例「A11 轨道色 RGB 跟基色分叉」正确报红 -> seek: track 的 RGB 与基色不一致：80b3ffff vs ffffffff
+SELFTEST: 反例「A11 基色不是正文主色」正确报红 -> seek: progress 的 RGB 与基色不一致：c0ffffff vs ffff8800; track 的 RGB 与基色不一致：80ffffff vs ffff8800; 进度条基色 ffff8800 不是本屏任一 primaryTextColor（A11 用 originalIconColor，着色时它就是主文字色，§15-8）
+SELFTEST: 反例「A11 又把进度条滑块藏起来了」正确报红 -> seek: thumbAlpha=0，播放器样式应常驻 255（滑块被藏起来＝又照通知卡那版画的）
+SELFTEST: 反例「A11 轨道厚度回到 4dp」正确报红 -> seek: 轨道厚度 4.0 dp，A11 是 maxHeight=3dp（§15-6）
+SELFTEST: 反例「A11 total 没有底色阴影」正确报红 -> seek: total 没有阴影（A11 setShadowLayer(1.5,1.5,1.5, 卡底色)）
+SELFTEST: 反例「A11 阴影色不是卡片底色」正确报红 -> seek: total 阴影色 ff123456 不是卡片底色（ff33404d,ffffffff）
+SELFTEST: 反例「A11 elapsed 也多了一层阴影」正确报红 -> seek: elapsed 也有阴影 —— A11 只给 total 加（原生就这一处）
+SELFTEST: 反例「A11 seek 见证整段缺失」正确报红 -> seek: 有取色日志却没有 a11 seek 见证（进度条那半段没施加）
+SELFTEST: 反例「A11 取色日志整段缺失」正确报红 -> relief: 浮雕用的底色 ff33404d 不在本屏卡片底色里（ffffffff）
+SELFTEST: 反例「A11 只有收起态几何见证」正确报红 -> art: 本轮没有 expanded 态的**可测量**见证 —— 该态在真机上未验证（门禁需要展开一次卡片）
+SELFTEST: 反例「A11 收起态也多画了一条进度条」正确报红 -> art(collapsed): collapsed 态进度条容器 seekVis=0，A11 该态应为 8
+SELFTEST: 反例「A11 展开态把进度条藏掉了」正确报红 -> art(expanded): expanded 态进度条容器 seekVis=8，A11 该态应为 0
+SELFTEST: 反例「清除按钮点了没监听」正确报红 -> tap: 内联按钮没有 OnClickListener（这一击是静默空转）
+SELFTEST: 反例「内联文字没按 OS5 藏起来」正确报红 -> tap: 内联按钮仍然可见(0)，hideInline 没生效（OS5 收纳栏不该出现这行文字）
+SELFTEST: 反例「点击见证日志缺失」正确报红 -> tap: 补挂了圆钮却没有点击见证日志（脚本没点，或这一击没落到我们的 View 上）
+SELFTEST: 反例「A11 播放器时间错用 dp 单位（不跟着放大）」正确报红 -> art(expanded): timePx 期望 54.6（播放器样式 14sp，跟 fontScale=1.3）实得 42; timePx 与 spec 的 timePx 不一致：art=42 spec=55
+SELFTEST: 反例「A11 副文错用 dp 单位（不跟着放大）」正确报红 -> art(expanded): subtextPx 期望 46.8（设备副文 = 12**sp**）实得 36; subtextPx 与 spec 的 artistPx 不一致：art=36 spec=47
+SELFTEST: 反例「对比度小数点被本地化（静默丢行）」正确报红 -> 格式漂移: 有 2 行「a11 palette state=」但只解析出 1 条 —— 断言在静默少跑
+SELFTEST: 反例「OS5 上重复补挂圆钮」正确报红 -> clear: 系统原生圆钮在位（native=true）却还补挂了 —— OS5 上会出现两枚重叠按钮
+SELFTEST: 反例「圆钮挂到 ConstraintLayout 上」正确报红 -> clear: 宿主是 NotificationsQuickSettingsContainer，不是 NotificationPanelView；ConstraintLayout 会吞掉 gravity
+SELFTEST: 反例「圆钮挂载日志没有宿主」正确报红 -> clear: 挂载日志没有 host=（不知道挂在谁身上，就无法判断 gravity 生不生效）
+SELFTEST: 反例「导航条可见性来源未判定」正确报红 -> clear: 导航条可见性的判定来源是 unset（应为 insets 或 config）
+SELFTEST: 反例「把导航条高度当成可见性」正确报红 -> clear: nav=false 与 navVis=1 不一致（边距分支应当用可见性，navH=0 只是见证值）
+SELFTEST: 反例「边距与可见性判定相反」正确报红 -> clear: 底边距期望 120.0px(nav=False) 实得 186.0px

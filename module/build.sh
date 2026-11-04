@@ -23,8 +23,9 @@ javac -nowarn -encoding UTF-8 -source 8 -target 8 -cp "$AJAR" -d build/stubs \
     --java build/gen
 
 # 3. module classes + R
+# 输出同时落到 build-log.txt：这份日志以前是手写的，过期好几天还会把老错误当新错误读。
 javac -nowarn -encoding UTF-8 -source 8 -target 8 -cp "$AJAR;build/stubs" -d build/classes \
-    $(find src -name '*.java') $(find build/gen -name '*.java')
+    $(find src -name '*.java') $(find build/gen -name '*.java') 2>&1 | tee build-log.txt
 
 # 4. dex
 "$JRE25/bin/java" -cp "$BT/lib/d8.jar" com.android.tools.r8.D8 \

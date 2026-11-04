@@ -1,0 +1,32 @@
+nodes=106
+-                                  TextView                   我一定能行！             (0, 2153, 1080, 2267) h=114   w=1080
+tv_time                            TextView                   06:39              (327, 285, 753, 512) h=227   w=426
+tv_date                            TextView                   11月4日   星期三        (375, 512, 704, 573) h=61    w=329
+notification_header                ViewGroup                                     (60, 609, 1020, 741) h=132   w=960
+icon                               ImageView                                     (120, 657, 168, 705) h=48    w=48
+app_name_text                      TextView                   系统界面               (192, 657, 336, 705) h=48    w=144
+notification_main_column           LinearLayout                                  (120, 735, 960, 842) h=107   w=840
+line1                              LinearLayout                                  (120, 735, 960, 792) h=57    w=840
+title                              TextView                   充电已完成              (120, 735, 330, 792) h=57    w=210
+text                               TextView                   充电已完成，请及时移除电源。     (120, 794, 960, 842) h=48    w=840
+notification_header                ViewGroup                                     (60, 884, 1020, 1016) h=132   w=960
+icon                               ImageView                                     (120, 932, 168, 980) h=48    w=48
+app_name_text                      TextView                   护眼模式               (192, 932, 336, 980) h=48    w=144
+expand_button                      Button                                        (864, 884, 1008, 1028) h=144   w=144
+notification_main_column           LinearLayout                                  (120, 1010, 960, 1060) h=50    w=840
+text                               TextView                   开启后，将根据使用场景自动调节屏幕颜 (120, 1012, 960, 1060) h=48    w=840
+notification_header                ViewGroup                                     (60, 1102, 1020, 1234) h=132   w=960
+icon                               ImageView                                     (120, 1150, 168, 1198) h=48    w=48
+app_name_text                      TextView                   vivo账号             (192, 1150, 331, 1198) h=48    w=139
+time                               TextView                   9 小时前              (379, 1150, 551, 1198) h=48    w=172
+notification_main_column           LinearLayout                                  (120, 1228, 960, 1393) h=165   w=840
+line1                              LinearLayout                                  (120, 1257, 804, 1314) h=57    w=684
+title                              TextView                   点击打开查找功能           (120, 1257, 456, 1314) h=57    w=336
+text                               TextView                   若丢失可定位和锁定设备，提升设备安全 (120, 1316, 804, 1364) h=48    w=684
+right_icon                         ImageView                                     (870, 1234, 960, 1324) h=90    w=90
+notification_header                ViewGroup                                     (60, 1435, 1020, 1567) h=132   w=960
+icon                               ImageView                                     (120, 1483, 168, 1531) h=48    w=48
+app_name_text                      TextView                   vivo服务             (192, 1483, 331, 1531) h=48    w=139
+notification_main_column           LinearLayout                                  (120, 1561, 960, 1668) h=107   w=840
+line1                              LinearLayout                                  (120, 1561, 960, 1618) h=57    w=840
+text                               TextView                   存在系统卡顿、功能异常等风险，点击关 (120, 1620, 960, 1668) h=48    w=840

@@ -1,0 +1,26 @@
+  ok   category transport
+  ok   actions 数量 期望 5 实得 5
+  ok   template android.app.Notification$MediaStyle
+  ok   isColorizedMedia true
+  ok   封面类型 BITMAP
+  ok   封面下发尺寸 期望 200x200 实得 200x200
+  ok   compactActions 期望 [2,3,0] 实得 ['2', '3', '0']
+  ok   notification_title_text_size 期望 14.0sp 实得 (14.0, 'sp')
+  ok   notification_subtext_size 期望 12.0dp 实得 (12.0, 'dp')（单位必须是 dp：dp 不跟 fontScale）
+  ok   notification_action_list_height 期望 60.0dp 实得 (60.0, 'dp')
+  ok   模块 COLLAPSED_TITLE_SP 实得 14.0 期望 14.0
+  ok   模块 COLLAPSED_SUBTEXT_DP 实得 12.0 期望 12.0
+  ok   模块 ACTION_LIST_HEIGHT_DP 实得 60.0 期望 60.0
+  ok   notification_right_icon_size 期望 36 dp 实得 36.0
+  ok   config_dialogCornerRadius 期望 2 dp 实得 2.0
+  ok   DeviceDefault 的圆角来源 @dimen/config_dialogCornerRadius
+  ok   按钮排布 期望按序出现 [48, 48, 52, 48, 48]，实得宽度序列 [0, 0, 48, 48, 52, 48, 48, 0, 0, 0]
+  ok   A11dimen qs_media_album_size=52 dp
+  ok   A11dimen qs_media_enabled_seekbar_height=3 dp
+  ok   A11dimen qs_media_disabled_seekbar_height=1 dp
+  ok   A11dimen qs_media_icon_size=16 dp
+  ok   A11color media_secondary_text=#99ffffff
+  ok   A11color media_seekbar_progress=#c0ffffff
+  ok   A11color media_disabled=#80ffffff
+  ok   A11font 标题 16sp ×1，副文/时间 14sp ×5
+A11 取证核对: 25 通过 / 0 失败
