@@ -3493,3 +3493,369 @@ A 方案（用户选"先 A 试试"）：
 滑块透明占位、滑块无尺寸、进度退回 iOS 粗胶囊）；`offline-all` 全绿。
 待定：滑块直径 10dp 是我按现值定的（A11 那两个模板没写 `android:thumb`，取自样式），
 等用户上眼后按观感调；B 方案（`seek=ios|a11` 做成用户可选）暂缓。
+
+## 2026-11-04（下午）P0-1：从"堆门禁"回到逆向，找到每帧位移的写入者
+
+### 0. 方法上的更正（用户提的，已写进 skill）
+
+这一轮我先花了两轮去修**自己的判据**（选材判据、媒体行排除判据），而真正决定修法的是"谁在按帧写位置"。
+定死的规矩：**同一轮里判据修到第二次就停手**，回到"哪个属性被谁按帧写成什么"去读代码；
+观感问题一律"逆向定因 → 改写入点 → 用户上眼"，门禁只留能一眼分红绿的极小集合。
+
+### 1. 症状被重新描述，方向才 turn 过来
+
+用户这句话是关键："点展开时，时间从右边往左边**跑**，到左边后立马闪现回右边"。
+看得见**移动过程** = 有位移动画按帧写位置，不是一次性摆错 —— 于是"补推时机/换延时"那一类方案全部作废。
+
+### 2. 逆向结论（两份子代理报告，framework 布局数学我自己复读了一遍）
+
+- framework `android.view.NotificationTopLineView`（A13，`work/tmp-re-os5toos3/A13-NotificationTopLineView.java:120-198`）：
+  `onMeasure` 用 OverflowAdjuster 算 `mViewsToDisappear`，`onLayout` **流式从左往右排、GONE 跳过、`start` 累加**，
+  被判消失的子节点走 `child.layout(start, top, start, top+h)`（零宽）。
+- 组子行的应用名是 **AOSP 原生**收掉的，不是 vivo：`NotificationGroupingUtil.updateChildrenAppearance`
+  → `AppNameApplicator`/`VisibilityApplicator` 的 `setVisibility(8)`（GONE），**发生在绑定期**、不在展开动画路径上；
+  A13/A15 规则一致（OS5 的 `sanitizeTopLine` 只多一句 `time.setAlpha(1f)`）。
+  这台机上没有 `show_timestamp_in_group_child` 这类布尔开关（framework-res 的 bool 里查不到）。
+- 每帧 `translationX` 的写入者是 `TransformState#transformViewTo/#transformViewFrom/#resetTransformedView`
+  （`work/tmp-re-os5toos3/os3-code-classes2.txt:532887/533356/533793`），调用链：
+  `ExpandableNotificationRow 展开回调 → NotificationChildrenContainer.setActualHeight（每帧，由 ViewState/PropertyAnimator 驱动）
+  → updateHeaderTransformation → NotificationViewWrapper.transform{To,From}
+  → ViewTransformationHelper（ValueAnimator）→ TransformState → View.setTranslationX`。
+  注册进 TransformState 的只有 `mIcon`(ALPHA)、`mExpandButton`、低优先级时的 `mHeaderText`(TRANSLATE)——
+  **OS3 那份 header wrapper 里连 `mTime` 字段都没有** ⇒ `time` 自己的 `translationX` 是无人争抢的通道。
+- 已排除（都是验到具体位置的排除，不是"我觉得"）：三个 APK 的全部 `res/layout/*.xml` 字符串池扫
+  `animateLayoutChanges` **0 命中**，LayoutTransition 在 SystemUI 只出现在 `BatteryMeterView`/`NavigationBarView`，
+  `TransitionManager.beginDelayedTransition` 唯一调用点是 `ChannelEditorListView`；
+  OS3 没有 `NotificationHeaderAnimationHelper`/`RowTranslationsManager`/`InterpolatedChildVisibility`。
+
+### 3. 改法（按上面的通道选择）
+
+`alignLineIntoColumn` 里新增每帧 `clampTimeVisualLeft(row, line, want)`：
+
+- 判定用**视觉左位** `rowVisualLeft`（逐级累加 `getLeft() + translationX`），不再用只含布局坐标的 `leftInRow`
+  —— 这正是旧版"过时一格"的原因：祖先每帧带位移，而我们按布局框算、又写回布局框。
+- 只有真要落进图标列（`vis < want`）才动手，动作是补 `time` 自己的 `translationX`；
+  已经在列右边就一个字不改 ⇒ 稳态观感完全不变。返回 `0 不需要 / 1 钳住 / 2 钳了还没到位`。
+- `col measure` 的 `time=` 改成报**视觉落点**，并新增 `clamp=`；验证器加 **L12**（`clamp=2` 判红）。
+- 接管方式**不再写死**：按 `sColumnHook` 实际自报 `header-time=column-hook|push-only`
+  （原来写死 push-only，等于门禁被自己的字符串骗了一整轮）。
+- col 钩子加入口心跳 `notify_row.col calls=N`，随补扫每 5s 重发：
+  从此能把"钩子没跑"与"跑了但一次性见证被 logd 每进程 250/s 整批冲掉"分开
+  —— 上一轮 L10 报"一条 measure 都没有"就是后者，差点把在跑的钩子当成没装上。
+
+### 4. 验收（装机 `4db73ebb79c5`，哈希一致）
+
+- `work/os3-evidence-rowlayout.sh` 三态 **14 通过 / 0 失败** ×3：`calls=269/290`，实测视觉落点全部 `+198`（66dp 列），
+  圆角 R1~R5、42dp 大图标、L7 组摘要保留原生小图标都在（11-03 那个"大图标消失"回归没有复发）。
+- 新的 `work/os3-evidence-timeframe.sh`（逐帧，调试键 `betteroriginos_trace_flicker`）：5 通过 / 0 失败，
+  12 个帧×行组合没有时间压进图标区间。
+- `work/offline-all.sh` 全绿；行排版验证器自检 **35 组**（新增 L12 与暂停态媒体行两组反例）；
+  逐帧验证器 `work/verify_time_frame.py --selftest` 8 组全咬。
+
+### 5. 还没证到的部分（别当成已收口）
+
+本仓库的调试样本里**没有 vivo 那种"应用名被收掉、时间成第一个可见子节点"的组子行**
+（同一 App 多条通知会被自动归组，而 AOSP 组子行的 header time 宽度是 0），
+所以 `clamp` 这条路径在自动取证里**从未被真正触发**（日志老实报"这一屏没有需要钳的帧"）。
+P0-1 的收口只能等用户在 vivo服务 组上眼：还滑就看那一帧是 `clamp=1`（钳了还动 ⇒ 有写入者在我们之后写）
+还是 `clamp=0`（这一行压根没进钩子 ⇒ 它的 top_line 走的是另一条路径），两种修法不同。
+
+### 6. 顺手挖到的判据坑（都是"改了判据却没改材料"那一类）
+
+- L3/L4 排除媒体行原来靠"行内有 SeekBar"，而取证前为了拿到 idle dump 会先 `dispatch pause`
+  ⇒ 暂停态的媒体行里根本没有 SeekBar ⇒ 被当独立行判红。也不能换成
+  `status_bar_latest_event_content`：真机 dump 里**每行都有**它，拿它当指纹会把所有行排除掉，
+  L3 退化成"没有可测行"的空转。现在用 transport 按钮 `action0..4`（≥3 枚）作指纹，
+  并配"把按钮 id 改名就该红"的反例。
+- 逐帧日志的续行不带 tag 前缀：`logcat | grep notify_row.trace` 只会抓到多行消息的第一行，
+  要按 `BetterOriginOS` 整进程过滤再拆条目。
+
+## 2026-11-04（深夜）P0-1 第二轮：我连着错了两次，最后靠读数纠回来
+
+用户上眼："还在动"，并且把症状说得更准了：**时间从右边往左边跑，到左边后立马闪现回右边**。
+这一轮改了三次方向，前两次都错，错因都值得记。
+
+### 判错一：「展开动画期间 `onLayout` 不重跑」
+
+依据是 `notify_row.col calls` 在连点期间 140→141 后冻住。**自己复测被推翻**：同一台机、同样连点，
+`calls` 从 23 跳到 99。错因不是读数假，是**读数取自已经坏掉的环境**——我按旧 dump 的坐标盲 tap 时
+焦点其实在 LSPosed 管理器，那一下把模块作用域里的 `com.android.systemui` 关掉了；之后新进程压根
+没被注入，`calls` 当然不动。（`lspctl scope list` 查到缺失 → `scope add` 加回 → 重启后模块日志
+114 条才算确认注入回来。）
+**教训：任何"每帧入口没跑"的结论，先证明注入活着、钩子装上了**（看 `header-time=` 自报与
+`top-line column hook hits=`），否则测的是空气。
+
+### 判错二：「钳位已经作用到屏幕上那枚时间」
+
+`col measure` 里 `line=+126 time=+198 moved=1` 看着像我们在守，但同批还有
+`line=+410 / +565 / +568 time=none`——`time=none` 说明**我压根没找到那枚时间**：
+`findTimeChild` 只扫 `top_line` 的**直接子节点**，而 vivo 行里的时间不是直接子节点
+⇒ 前两版钳位对 vivo 行完全空转（`col predraw wrote=0` 同源）。改成整棵子树找才第一次碰到屏幕上那枚。
+
+### 判错三（口径错）：把"别动"实现成了"别压图标"
+
+用户要的是**别来回跑**，我的钳位只设了下界（视觉左位不早于 66dp 列）。实测 `top_line` 自己在
+126/200/410/565/568 之间移动——线是流式排子节点的容器，兄弟节点可见性/宽度一翻（AOSP
+`NotificationGroupingUtil` 对 `app_name_text`、`sanitizeTopLine` 对 `time` 写 GONE/VISIBLE；
+`ActivatableNotificationView.makeActive/makeInactive` 还会换 time 的**文本**从而改宽度），
+线的左端就跟着换，时间被整条线拖着走。这种滑动**从没跨过 198 那条下界**，于是钳位认为"不需要动"
+——典型的"我修的是我以为的病"。
+
+### 现在的实现：钉在稳态，而不是钉在常量
+
+`freezeTimeLeft(row, time, want)`（布局期与 pre-draw 两条路共用同一份逻辑）：
+
+- 学会这枚时间**静止时**的视觉左位（含各级祖先 `getLeft + translationX` 累加）；
+- 过渡帧偏离超过 2px ⇒ 用 `time` 自己的 `translationX` 写回稳态值（OS3 header wrapper 没有 `mTime`、
+  TransformState 不注册它 ⇒ 这条通道没人争抢，逆向已证）；
+- 偏离持续 ≥400ms 才认作真变化（换曲目、文本长度变了）并跟进，避免永远钉死在旧位置；
+- 护栏：低于 66dp 列的落点**绝不认作稳态**，直接顶回列上（"压图标"这个更严重的形态仍被挡住）。
+
+诊断行留在码里（各有硬上限与节流，不会刷屏），供下次读数：`col reg`（登记了谁、找到几枚时间）、
+`col predraw`（每帧到底写没写）、`col snap`（线里每个子节点的 `可见性:宽度`，用来点名翻动者）。
+
+装机 `d769366feb0c`（两端哈希一致），SystemUI 重启并确认注入（`header-time=column-hook`），
+`work/offline-all.sh` 全绿。设备收尾：调试样本清零、`betteroriginos_trace_flicker=0`、息屏。
+
+### 今晚没能就地确认的两件事（明早先解决这两个，别继续猜）
+
+1. **vivo服务 的子行已从列表消失**（只剩摘要，摘要行里没有 `time` 节点）⇒ 用户描述的形狀当前在屏上
+   不存在，无法就地复现。
+2. **我们 App 的通知被系统压住**：`dumpsys notification` 里
+   `AppSettings: com.betteroriginos importance=DEFAULT moreNotificationsEnabled=false`，
+   投 `post`/`postlong` 后只有 `postlong` 进了 NMS 且列表不显示 ⇒ 自造样本这条路今晚不通。
+
+两条都是**观察条件**问题，不是产品结论。恢复观察条件后先看 `col snap` 点名到底是谁在翻，
+再判"钉稳态"够不够：如果翻的是线本身且稳态值不可信，就得改去治线的摆放（而不是继续钉时间）。
+
+## 2026-11-04（深夜·定案）滑动是我们自己算出来的：一个属性三个主人 + 一处重复计算的左偏移
+
+用户："还是会往左移动，你还是没逆到关键点上，上子 agent 完整逆出逻辑，别自己猜了。"
+于是派了四位做穷尽逆向/自审（完整帧序、vivo 侧 header 与 time 写入者、OS5 同场景对照、
+以及**只审我自己代码**的失效路径）。自审直接给出定案。
+
+### 真因（两条，都在我们自己代码里）
+
+1. **`getRight()` 已经含 `getLeft()`，被算了两遍。**
+   `pushTimeRight` 里 `d = target - (offX + time.getRight())`，而 `offX` 已经是逐级累加的
+   `getLeft()` ⇒ 目标里混进了 `time.getLeft()` 这个**每帧都在变**的量
+   （`NotificationTopLineView.onLayout` 是流式 `start` 累加，兄弟可见性一翻它就变）。
+   **目标自己抖 ⇒ 我们每帧把时间推向一个新抖的目标**，看起来完全像"系统在抢写"，其实是自造抖动。
+2. **同一枚 `time` 有三个主人。** `c.layout()`（`HEADER_TEXT_IDS` 里含 `"time"`）、
+   `pushTimeRight`（绝对 translationX，目标=行右缘/箭头左）、`freezeTimeLeft`
+   （增量 translationX，目标=它自己学的稳态）——口径与目标都不同，逐帧互相覆盖。
+
+顺带纠正我自己两个错判：
+- **"pre-draw 慢一帧"不成立**：`performTraversals` 是 measure → layout → dispatchOnPreDraw → draw，
+  pre-draw 是本帧最后写者。"钉不住"只能解释为"这一帧没作用到那枚视图"。
+- **"登记后失联重取"是我注释里承诺、代码里没写**：`registerColClamp` 的 `containsKey(row)` 直接 return，
+  5 个名额被隐藏副本占满 ⇒ 屏幕上那枚从未被钳（`pre-draw wrote=0` 就是这么来的，
+  而这条日志只在 `wrote>0` 才打，于是"没发生"与"没观察到"在日志里长得一样）。
+
+### 已改（装机 `83a89277c339`）
+
+- `d = target - (offX + time.getWidth())`（去掉重复的左偏移），并在写入后**回读**校验，
+  还差 >3px 就报结果码 2。
+- `HEADER_TEXT_IDS` **去掉 `time` 与 `time_divider`**：搬列只搬左列文本，不再碰时间。
+- 删掉 `freezeTimeLeft` / `TIME_FREEZE` / pre-draw 那套（`COL_CLAMP_*`、`registerColClamp`、
+  `clampRegisteredRows`、`installColPreDrawClamp`）与 `clampTimeVisualLeft`；
+  收敛成**唯一入口** `positionTime(row, line)` → `pushTimeRight(time, "layout")`，
+  由布局钩子**每趟调用**（真机已证明展开期间 `onLayout` 每帧重跑：连点时 `calls` 23→99）。
+  `pushTimeRight` 写绝对位移 ⇒ 天然幂等，重复调用只会收敛到同一个目标。
+- `pushTimeRight` 返回结果码（-1 无时间 / 0 已在位 / 1 推到位 / 2 推了没到位），
+  继续用 `col measure … clamp=` 报出去（L12 判据不变）。
+- 离线：`work/offline-all.sh` 全绿（行排版验证器 35 组、逐帧验证器 8 组）。
+
+### 仍未就地确认（观察条件，不是代码问题）
+
+屏上当前只有 2 行且**都没有可见的 `time` 节点**：vivo服务 的子行已不在列表里，
+而我们 App 的通知被系统整应用关闭（`dumpsys notification`：`AppSettings: com.betteroriginos …
+moreNotificationsEnabled=false`，怀疑是反复投调试通知触发 vivo 的频繁通知抑制）。
+⇒ "target 不再抖"这一条要等观察条件恢复再读 `notify_row.time push d=… target=…`。
+
+### 这轮另外两条已入库的逆向事实（写进 skill §4.6）
+
+- A13 的 `time` 是 `NotificationDateTimeView`，三处写入点全是 `setTime(J)`，
+  **没有任何 `setText`/`LayoutParams` 写它** ⇒ 相对时间文本自刷新会改宽度、进而改 `start` 累加。
+- `recreateNotificationHeader`（`makeNotificationGroupHeader` → `RemoteViews.apply`）会在动画后
+  **重灌 header 子树**，我们写过的摆位全部作废；且 header 有两个实例
+  （`mNotificationHeader` / `mNotificationHeaderLowPriority`），修正要两份都覆盖。
+- vivo **没有**替换 OS3 的 header 类（我们钩的就是被画的那个）；OS5 换的是 time 控件类
+  （`com.android.internal.widget.NotificationDateTimeView`）。
+- A15 观感不滑的机制差异：A15 有 vivo 的 `NotificationHeaderAnimationHelper` ——
+  动画里 `time` 全程 VISIBLE、只动 **alpha**（150ms），GONE 推迟到 `withEndAction`；
+  而 `top_line` 的 measure/layout **只读可见性与宽度、0 处读 alpha** ⇒ 显隐不该在动画中翻。
+  A13 侧对应落点是 `sanitizeTopLine`（classes2.dex @`37e48a`，且 A13 那处没有 A15 的 `setAlpha(1f)`）。
+
+### 第四位回来后补的最后一刀（装机 `568bd83d18f8`）
+
+它确认了两件我们此前假设错的事：
+- `ViewRootImpl.performTraversals` 的字节码次序是 `performMeasure`→`performLayout`→
+  `dispatchOnGlobalLayout`→**`dispatchOnPreDraw`**→`performDraw` ⇒ pre-draw 在本帧布局之后，
+  **时序不是"钉不住"的原因**。
+- 线自己为什么会动：`notification_top_line` 的布局规则是
+  `layout_width=-2`(wrap) + `alignParentStart` + **`toStartOf=expand_button`**，而
+  `NotificationTopLineView.onMeasure` 结尾 `setMeasuredDimension(givenWidth, …)`
+  ⇒ 线的宽度跟着 `expand_button.left` 走，`time.left = 线的左 + paddingStart + Σ 前面兄弟宽度`。
+  **读数里 `+126 / +132 / +565` 的差 = 不同 header 实例 + 我们自己往 `top_line.leftMargin` 做 `+=`
+  （`shiftHeaderText`）造成的别名落点** —— 那正是本文件明令禁止的"累加 + 屏幕坐标"写法。
+
+于是按"一个属性一个主人"再收一处：`sColumnHook` 为真时，legacy 的
+`convergeHeaderColumn`/`shiftHeaderText` 整条路径直接跳过（钩子没装上才退回）。
+
+三态取证复跑（同一批证据，逐态）：**14 通过 / 0 失败 ×3**，其中
+`L3 标题列=66dp`、`L5 应用名与标题同列` 仍然绿 ⇒ **撤掉 legacy 搬路没有把列对齐弄坏**（列由钩子独立持有）；
+`L10` 实测视觉落点全部在列右（+780..+828）、`L12 clamp=1`（时间在由唯一主人摆位且回读通过）。
+唯一红是 harness 自己的观察侧断言"展开没发生（子行 0→0，最高行 642→642）"——
+它的 tap 没触发展开，属于取证脚本问题，不是产品断言。
+
+**还欠用户上眼那一次**：这版把"三个主人 + 抖动目标"都拆掉了，理论上不该再有滑；
+但真机上需要一条**带可见 time 的 vivo 组子行**来确认（今晚屏上没有，且我们 App 的通知被系统整应用关闭）。
+读数入口已经留着：`notify_row.time push d=… target=… why=…` 与 `col measure … time=+… clamp=…`。
+
+## 2026-11-05（凌晨）第五版：撤掉我改坏的一刀，并按帧序"加入同一帧"
+
+装机 `50295c5e49a9`。三件事：
+
+1. **撤销"布局钩子装着就跳过 legacy 搬路"**。那是我的第二个误伤：撤掉之后真机 dump 里
+   LSPosed 组子行的应用名从 `+198` 掉到 **`+126`**（图标列）——两个写者其实在互相补位，
+   我按"一个属性一个主人"的原则去掉了其中一个，却没补上它的职责。已恢复原路径。
+2. **legacy 的测量口径改为与本文件其它摆位同源**：`getLocationOnScreen` 相减 →
+   `rowVisualLeft`（逐级累加，过渡帧不吃祖先位移）。这才是 `+126/+132/+565` 那种别名读数的根。
+3. **按 RE 的帧序补"同一帧"**：`NotificationContentView.onLayout` =
+   FrameLayout 排完所有子 → `updateClipping` → **`selectLayout` 翻可见性**，
+   即翻转发生在我们的摆位**之后**；刚被翻出来的那枚沿用它当隐藏副本时的旧位置，
+   下一帧才被摆回 ⇒ 用户看到的"滑到左边、闪回右边"。因此加
+   `installSelectLayoutTimeHook`：钩 `NotificationContentView.selectLayout` 的 after，
+   只对被接管的行（有 42dp 图标），把该行里**所有在屏上的** time 交给同一个主人
+   `pushTimeRight`（绝对位移 ⇒ 幂等）。
+
+**未闭环（诚实记）**：装完后屏上只剩 vivo服务 的摘要一条、**子行不存在**，也没有
+"带可见时间的被接管行" ⇒ 这一版同样只能确认"列没被改坏"（vivo 摘要行应用名 `+198` 正常），
+**不能确认滑动已消失**。观察条件恢复（vivo 组带子行 + 我们 App 的"允许通知"打开）后，
+读 `notify_row.time push … why=selayout` 是否每帧都在、以及逐帧条目里被画那枚的 `L` 是否始终 ≥198。
+
+## 2026-11-05（凌晨·真正的靶子）滑的是**组摘要行**，而我们五版都在改别的行
+
+用现成的逐帧读数（调试键 `betteroriginos_trace_flicker`）抓到了决定性一条：
+
+```
+f=139 id=6abb4b2 h=1023 big=-  在屏时间 L=674
+f=142 id=6abb4b2 h=1023 big=-  在屏时间 L=578   ← 左移 96px
+f=144 id=6abb4b2 h=1023 big=-  在屏时间 L=578
+f=149 id=6abb4b2 h=1023 big=-  在屏时间 L=674   ← 闪回
+```
+
+`big=-` 是钥匙：**这行没有 42dp 大图标 ⇒ 它是组摘要行，而我们的代码一直把它当
+"不归我们接管"显式跳过**（`why=summary-header` / `not-taken`）。
+所以前面五版（布局期搬列、translationX 钳位、pre-draw、单一主人、撤 legacy）
+**没有一版作用在用户看到的那一行上** —— 这就是"屡提屡没改好"的真实原因，不是修得不够狠，是修错了对象。
+
+### 成因与锚的选择
+
+摘举行静止时时间在最右（L=674、宽 178）；展开动画里 `notification_top_line` 的宽度随内容变化，
+而时间是流式排的最后一个子节点 ⇒ 它的自然位置被临时推到 578 再回来。
+- 第一版锚 = `header_button_container` 左缘：**跨度归零**（674/578 抖动没了），
+  但稳态被钉成 578 ⇒ **用"位置偏左"换了"不滑"**，属于观感回归，当场否掉。
+- 现在的锚 = 该时间视图自己**最近 1500ms 内出现过的最右自然位置**（不含我们写的位移）：
+  静止时自然右缘==最大值 ⇒ 位移 0，**不改原生外观**；动画中自然位置左移 ⇒ 补正位移顶回去；
+  文本真变短时右缘保持、左缘右移（= 右对齐时间的原生行为）。只写**绝对** `translationX` ⇒ 幂等；
+  补位 >300px 直接放弃。入口在 `NotificationContentView.selectLayout` 之后
+  （帧序结论：翻转可见性发生在我们的摆位之后 ⇒ 必须紧跟它），对被接管的行仍走 `pushTimeRight`，
+  摘举行走 `anchorTimeToMaxRight`，媒体行排除。
+
+装机 `8ca2994bbc9e`。**这一版仍没做就地复测**：vivo服务 又收回成单条 255px 行且不带时间，
+屏上没有"带时间的摘要行"了 ⇒ 读数取不到。要闭环只欠一个条件：屏上出现一个
+**带时间戳的组摘要行**（vivo服务 攒够 2 条以上，或任意 App 的分组通知），
+我再跑同一条普查，看那枚 `L` 的跨度是否为 0、且稳态值 == 原生 674 那一档。
+
+## 2026-11-05（上午）P0-1 真正的定案：那个动作是我们自己造的，方向从头就反了
+
+用户一句"原生通知是在左上角一直不动的，展开也没变化"结束了持续十版的循环。
+
+### 对照实验（早该做的那一个）
+
+把模块**整个禁用**（`lspctl module disable --user=0 com.betteroriginos` + 重启 SystemUI +
+按 pid 确认该进程零模块日志），同一处再看一次：**A13 原生把 header 时间放在左上槽，
+展开全程不动**。
+
+⇒ "从右滑到左、到左又闪回右"不是 vivo 的行为，是我们的：原生把时间摆在左槽，而我们的
+42dp 大图标占了同一段，于是 `pushTimeRight` 每帧把时间往右搬、vivo 每帧按原生摆回去 ——
+**同一个属性上逐帧对拉**。十版全在"怎么把时间钉得更牢"，所以十版都没变化。
+
+### 一个必须记进纪律的错误：假对照
+
+`betteroriginos_feature_notify_row=0` **不会关掉时间相关的钩子**：关掉之后 `restyled light`=0
+（行样式确实回原生），但日志里仍有 `header-time=column-hook`、`col calls=57`
+⇒ 布局钩子 / selectLayout 钩子 / margin 钉位 / 动画闸全在跑。
+所以"我关掉功能再看看"这种对照，除非**整个禁用模块并按 pid 验零日志**，否则测的还是被改过的状态。
+前几轮的若干判断正建立在这种假对照上。
+
+### 决定（用户认可"先这样"）
+
+`RELOCATE_HEADER_TIME = false`：A13 侧**不再搬时间**，让它留在原生左上槽、彻底不动。
+装机 `c374c9ce72cf`，模块已重新启用、注入确认（84 条日志）、`work/offline-all.sh` 全绿。
+文本列（app_name/title → 66dp）、圆角、图标等其它接管不变；`sanitizeTopLine` 动画闸与
+`mHeaderTextMarginEnd` 钉位保留（只增加稳定，且不再与原生对拉）。
+
+**留下的取舍（下次继续，不是 bug）**：左上槽的时间会与我们的大图标挤。两条路都只动我们自己
+拥有的视图 ⇒ 不会再有逐帧对拉：① 这类行不放大图标；② 把大图标挪到时间右边。
+
+### 方法论
+
+**"改了十遍没变化"这个信号本身就是答案**：说明我们改的对象不受我们支配。
+时间是原生每帧重排的**下游**，钉不住；要动就动我们拥有的视图（图标/容器是我们 addView 的）。
+任何观感问题，第一步做"整个关掉"的原生对照，并按 pid 验证关掉是真的关掉了。
+
+## 2026-11-05（上午·连带 bug）组摘要行的小图标变成空白边框
+
+用户报：`Android 系统`、`vivo服务` 等通知左上角小图标变成空白边框。
+
+根因（一条纪律没守住）：防"小图标闪一下"的手法是**压 drawable alpha**（摘 drawable 会让
+wrap_content 图标 measure 成 0、把 header 列数学搞塌；压视图 alpha/可见性/scale 又守不住，
+vivo 每帧写回）。但 `guardLightNativeIcon` 注册的是**每帧 pre-draw** 兜底，而它的入口之一
+（"stray 兜底"）只要求"这行里有 `CachingIconView`"就注册并开始压 ⇒
+**组摘要行按 L7 策略保留原生小图标、不放大图标**，于是被压成 alpha 0 却没有顶替物，
+而且每帧被重新压回去、永不恢复 ⇒ 空白边框。真机 `light.native RELEASE` 0 条也印证
+"我们的放开路径从不跑"，所以任何压了没顶替的图标都会永久消失。
+
+修法：`suppressNativeIcon(...,true)` 的两个入口都先查 `findTag(root) != null`
+（这一行是否真有我们的 42dp 大图标顶替）；没有顶替就反过来 `suppressNativeIcon(ni,false)`
+把 alpha 恢复 —— 已经压坏的行因此自愈。装机 `bf54bc70f763`，`work/offline-all.sh` 全绿。
+
+纪律（写进 skill §4.1）：**压掉一个原生视图的内容，必须同时确认有顶替物；
+"每帧兜底"型的抑制一旦注册，忘记顶替就是永久消失，而不是闪一下。**
+
+## 2026-11-05（上午续）组摘要行图标空白：判据必须与"收法"一致
+
+用户报部分应用（Android 系统、vivo服务）左上角图标变成**空白圆角矩形**。真对照（整个禁用模块、
+按 pid 确认零模块日志）证明**原生有图标** ⇒ 是我们压掉的。三轮才收干净，每轮都错在"过滤判据
+比收集判据窄"：
+
+1. 第一版只挡 `suppressNativeIcon` 的两个入口 ⇒ 没用，因为隐藏是另一条 blanket 干的：
+   `collectHideTargets` + `GUARD_TARGETS` 每帧重压。
+2. 第二版在隐藏名单入表处过滤，但只认类名 `CachingIconView` ⇒ 漏；因为 `collectHideTargets`
+   是**两条判据**：类名 `CachingIconView` **或** id `:id/icon` / `:id/left_icon`
+   （摘要行那颗其实是普通 `ImageView`+`android:id/icon`）。抽出 `isIconView()` 让两边共用后，
+   `vivo服务` 恢复。
+3. `Android 系统` 仍空 ⇒ 顶替物本身是空的：我们放了 42dp ImageView 且它在显示，但
+   `getDrawable()==null`（`android` 包取不到应用图标），于是"有顶替"成立、原生被压，
+   露出我们那个没内容的圆角壳。判据补一条：**顶替物必须真的有图**。
+
+纪律：`"不许压掉原生内容"的判据必须与"要压哪些"的判据**同源**（共用一个谓词函数），
+并且"顶替物存在"≠"顶替物有内容"。装机 `6ea2b14883e7`。
+
+### 收尾状态（11-05 上午·提交前如实记）
+
+- **P0-1 header 时间**：A13 侧已改为**不搬时间**（`RELOCATE_HEADER_TIME=false`），时间留在原生左上槽；
+  原生对照（整个禁用模块、按 pid 验零日志）证明原生时间戳全程不动 ⇒ 之前的"往左跑再闪回右"
+  是我们搬迁与原生逐帧重排对拉的结果。用户认可"先这样"。
+  **遗留取舍**：左上槽时间会与我们的大图标挤，候选方案是"这类行不放大图标"或"大图标挪到时间右边"
+  （都只动我们拥有的视图）。
+- **组摘要行图标空白**：`vivo服务` 已恢复；`Android 系统`（pkg=`android`）那行**仍未恢复**，
+  且**没有读数**——逐帧通道只在状态变化时打印，滚动 8 次它一条没变。已抓到的两行都是
+  "顶替图标在显示且带图、原生正常让位"，所以那一行的病因还没定位。
+  下一步：把这组 `ivs=`/`big=` 字段挂到**每秒必打**的例行见证上（不依赖重绘），
+  分清楚它是 `vis=8`（被 GONE）、`alpha=0` 还是 `da0`（被压）——三种对应三种修法，不猜。
+- 逐帧通道新增字段 `ivs=`（屏上所有图标类节点的 类/id/可见性/alpha/drawableAlpha）与
+  `big=` 的 `:v`/`:d` 两位，作为常备诊断（按状态变化打印，不刷屏）。

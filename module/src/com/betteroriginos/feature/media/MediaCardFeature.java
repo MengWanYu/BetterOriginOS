@@ -1064,7 +1064,10 @@ public final class MediaCardFeature extends Feature {
                 // 会逼出第二次淡入，过渡被重启就成了硬跳）
                 refreshColors(true);
                 syncArt();
-                updateProgress();
+                // 把回调自带的那份交给 updateProgress（A11 原生就是这么做的）：
+                // 这里再轮询一次 controller.getMetadata() 会在切歌空窗期拿到 null，
+                // 于是时长被当成 0、整条 seek 容器藏掉、两枚时间挤到左边。
+                updateProgress(metadata);
             }
 
             @Override
@@ -2979,6 +2982,19 @@ public final class MediaCardFeature extends Feature {
         }
 
         void updateProgress() {
+            updateProgress(null);
+        }
+
+        /**
+         * @param known 来自 `onMetadataChanged` 回调自带的那份 metadata。
+         *                  A11 原生就是用它（`NotificationMediaTemplateViewWrapper` 的 mMediaCallback：
+         *                  `mMediaMetadata = mediaMetadata; updateDuration();`），
+         *                  而我们原来在这里**重新轮询** `controller.getMetadata()` ——
+         *                  切歌那一拍曲名先到、新 metadata 还没落到会话上，轮询拿到 null ⇒
+         *                  时长被当成 0 ⇒ 整条 seek 容器 GONE ⇒ 列按零宽重测 ⇒
+         *                  恢复时 `weight=1` 的条拿不到剩余宽度、两枚时间贴合到左（用户报的"切歌时进度条闪一下"）。
+         */
+        void updateProgress(MediaMetadata known) {
             if (controller == null) {
                 return;
             }
@@ -2996,9 +3012,13 @@ public final class MediaCardFeature extends Feature {
                     return;
                 }
                 pendingSeekMs = -1;
-                MediaMetadata md = controller.getMetadata();
+                MediaMetadata md = known != null ? known : controller.getMetadata();
                 PlaybackState st = controller.getPlaybackState();
-                long duration = md == null ? 0 : md.getLong(MediaMetadata.METADATA_KEY_DURATION);
+                // 时长 sticky：A11 的 `updateDuration()` 在 metadata==null 时**直接 return**，
+                // 也就是沿用上一首的 max/总时长，而不是当成 0。原来这里 `md==null → 0`
+                // 把"暂时没拿到"错当成"这首歌没有时长"，于是切歌空窗期整条进度条被藏掉。
+                long duration = md == null ? lastDurationMs
+                        : md.getLong(MediaMetadata.METADATA_KEY_DURATION);
                 long position = st == null ? 0 : st.getPosition();
                 // A11 的"时长未知就没有进度条"这条判据（§15-7）；只在值变了才会走日志/post
                 lastDurationMs = duration;

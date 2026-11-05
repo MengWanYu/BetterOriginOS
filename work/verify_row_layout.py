@@ -18,6 +18,12 @@
   R4 shelf top=1 bottom=1；
   R5 背景四角必须等于 roundness * R（容差 1px）：top=0 却画了圆角，或 top=1 却没画，都判红。
 
+日志侧（不依赖 uiautomator）
+  L9 header 时间左偏移 >= 66dp 列；
+  L10 模块自报 header-time=column-hook 时，必须有 notify_row.col measure（钩子入口 calls= 心跳
+      把它分成"钩子没跑"与"跑了但这一屏没有可判 header"两种病）；
+  L11 col clamp 与 col skip 的早退原因必须能被后续实测补齐。
+
 用法：
   python work/verify_row_layout.py --dump x.xml --log y.log [--density 3.0]
   python work/verify_row_layout.py --selftest
@@ -40,6 +46,24 @@ def attr(node, key):
 
 def nodes(xml_text):
     return NODE_RE.findall(xml_text)
+
+
+def is_media_row(row_nodes):
+    """MediaStyle（播放卡）行的指纹。两条都要，且都不能只靠 SeekBar：
+    ① 进度条那排的可见性是"有会话 && 有时长 && 展开"，而取证为了拿 idle dump 必须先
+       dispatch pause ⇒ 暂停态的媒体行里没有 SeekBar（11-04 三态就是这样把媒体行当独立行
+       判红 L3，实得 60px）；
+    ② 不能用 status_bar_latest_event_content —— 真机 dump 里**每一行**都带它（13:52 实测
+       5/5 行都有），拿它当指纹会把所有行排除掉，L3 退化成"没有可测行"的空转。
+    媒体行独有的是 transport 按钮 action0..action4；普通通知在这台机上到不了 3 枚。"""
+    actions = set()
+    for n in row_nodes:
+        if attr(n, "class").endswith("SeekBar"):
+            return True
+        m = re.search(r":id/action(\d)$", attr(n, "resource-id"))
+        if m:
+            actions.add(m.group(1))
+    return len(actions) >= 3
 
 
 def bounds(node):
@@ -167,8 +191,12 @@ def check_dump(xml_text, density):
             continue  # 组摘要保留原生小图标、组子行另有口径，都不参与独立行断言
         # 媒体行不归 notify_row 排版（那一行由 MediaCardFeature 自绘，A11 样式里
         # 文字列按通知模板走 20dp 内缩，不是 66dp 列）⇒ 拿它判 L3 是判据没关门，
-        # 不是产品坏了。dump 里它的指纹就是行内有一枚 SeekBar。
-        if any(attr(n, "class").endswith("SeekBar") for n in rec["nodes"]):
+        # 不是产品坏了。
+        # 指纹不能只看 SeekBar：进度条那一排的可见性是"有会话 && 有时长 && 展开"，
+        # 取证前为了取到 idle dump 会先 dispatch pause ⇒ 暂停态的媒体行里根本没有 SeekBar，
+        # 11-04 三态取证就是这样在媒体行上报了假红（L3 实得 60px）。
+        # action0 / status_bar_latest_event_content 是 MediaStyle 行自带的，暂停也在。
+        if is_media_row(rec["nodes"]):
             continue
         title = None
         header_h = None
@@ -275,10 +303,16 @@ COL_LAYOUT_RE = re.compile(
 COL_MEASURE_RE = re.compile(
     r"notify_row\.col measure row=(?P<row>\S+) lineId=(?P<lineId>\S+) line=(?P<line>[+-]?\d+)"
     r" time=(?P<time>[+-]?\d+|none) want=(?P<want>[+-]?\d+) d=(?P<d>[+-]?\d+)"
-    r" moved=(?P<moved>\d+)")
+    r" moved=(?P<moved>\d+)(?: clamp=(?P<clamp>\d+))?")
+# clamp= 是每帧视觉钳位的结果：0=不需要动 1=钳住了 2=钳了还没到位（视觉仍落在图标列里）
+COL_CLAMPED_RE = re.compile(r"notify_row\.col measure .*?clamp=(\d+)")
 # 模块在 install 那一行自报的接管方式（push-only / column-hook）：col 那套断言的唯一开关。
 # 挂在"installed"同一行：单独一行的启动期日志会被 logd 每进程 250/s 限流整条冲掉。
 COL_MODE_RE = re.compile(r"notify row feature installed header-time=(\S+)")
+# 钩子入口的心跳计数（模块每 5s 重发一次）：它把"col measure 读不到"分成两种截然不同的病 ——
+# calls=0 是钩子根本没跑（运行时 header 不是这个类 / 被 vivo 子类覆盖），
+# calls>0 是跑了但一次性见证被 logd 每进程限流整批冲掉。没有这行就只能猜。
+COL_CALLS_RE = re.compile(r"notify_row\.col calls=(\d+)")
 # 只有"这行不归我们接管"是正当早退；其余原因必须后来被实测补上，否则就是漏管
 # 只有"这行不归我们接管"与"vivo 分组卡摘要 header（原生列、不带 42dp 图标）"算正当早退；
 # 其余原因必须后来被实测补上，否则就是漏管
@@ -305,6 +339,17 @@ def check_column_log(log_text, density=3.0, install_text=None):
         return [], ["L10/L11 未启用：模块自报 header-time=%s（col 布局钩子没装），"
                     "时间落点只由 L9 从 dump 量" % modes[-1].strip()]
     measures = COL_MEASURE_RE.findall(log_text)
+    calls = COL_CALLS_RE.findall((install_text or "") + "\n" + log_text)
+    n_calls = max([int(c) for c in calls], default=None)
+    if n_calls is None:
+        fails.append("L10 没有 col 心跳（notify_row.col calls=…）：分不清'钩子没跑'与'跑了但证据被"
+                     " logd 冲掉'，本轮不给结论")
+    elif int(n_calls) == 0:
+        fails.append("L10 钩子自报装上了、但 alignLineIntoColumn 一次都没进（calls=0）："
+                     "运行时这一行的 top_line 不是 android.view.NotificationTopLineView，"
+                     "或被 vivo 子类覆盖了 onLayout")
+    else:
+        oks.append("L10 心跳：布局期对位被调用 %s 次" % n_calls)
     seen_lines = set(m[1] for m in measures)
     numeric = [int(m[3]) for m in measures if m[3] != "none"]
     none_cnt = sum(1 for m in measures if m[3] == "none")
@@ -313,7 +358,8 @@ def check_column_log(log_text, density=3.0, install_text=None):
     clamps = COL_CLAMP_RE.findall(log_text)
     moved = COL_LAYOUT_RE.findall(log_text)
     if not measures:
-        fails.append("L10 一条 col measure 都没有：钩子没跑，或观察窗口没覆盖到被接管的行（判据空转）")
+        fails.append("L10 一条 col measure 都没有（calls=%s）：要么这一屏没有被接管的 header，"
+                     "要么窗口太短没跨到 5s 心跳重发" % n_calls)
     else:
         low = [t for t in numeric if t < want_px - 4]
         if low:
@@ -328,6 +374,17 @@ def check_column_log(log_text, density=3.0, install_text=None):
     if clamps:
         fails.append("L11 出现 %d 条 clamp（文本列推不动，时间还会压在图标上）：%s"
                      % (len(clamps), ", ".join("d=%s room=%s" % (c[0], c[1]) for c in clamps[:3])))
+    # L12：每帧视觉钳位的结果。time= 现在是**含祖先 translationX 的视觉左位**，
+    # 所以这一条量的是屏幕上真画出来的位置，而不是布局框里的理想值。
+    clamped = COL_CLAMPED_RE.findall(log_text)
+    if any(c == "2" for c in clamped):
+        fails.append("L12 视觉钳位跑了但没到位（clamp=2 %d 条）：时间仍会画在图标列里"
+                     % sum(1 for c in clamped if c == "2"))
+    elif any(c == "1" for c in clamped):
+        oks.append("L12 过渡帧的视觉落点被拉回列上（clamp=1 %d 条 / 共 %d 条实测）"
+                   % (sum(1 for c in clamped if c == "1"), len(clamped)))
+    elif clamped:
+        oks.append("L12 这一屏没有需要钳的帧（%d 条实测全是不需要动的稳态）" % len(clamped))
     # 非正当早退：只要同一 lineId 后来被实测过，就是"瞬时没挂上、下一趟补上了"，可以放行
     unresolved = [(w, l) for (w, _pkg, l) in skips
                   if "why=" + w not in COL_ALLOWED_WHY and l not in seen_lines]
@@ -471,9 +528,30 @@ GOOD_XML_MEDIA = GOOD_XML.replace(
     ' <node resource-id="com.android.systemui:id/expandableNotificationRow" bounds="[60,975]',
     MEDIA_ROW + ' <node resource-id="com.android.systemui:id/expandableNotificationRow" bounds="[60,975]')
 
+# 暂停态的媒体行：进度条那一排的可见性是"有会话 && 有时长 && 展开"，而取证为了拿 idle dump
+# 必须先 dispatch pause ⇒ 这一行里没有 SeekBar，只剩 transport 按钮 action0..action4
+#（真机 row-ffbaf8e30a2c-idle.xml 实测）。判据不能依赖 SeekBar。
+MEDIA_ROW_PAUSED = "\n".join([
+    ' <node resource-id="com.android.systemui:id/expandableNotificationRow" bounds="[60,420][1020,975]">',
+    '  <node class="android.widget.TextView" resource-id="com.android.systemui:id/notification_title" bounds="[120,470][900,527]"/>',
+    '  <node class="android.widget.FrameLayout" resource-id="android:id/status_bar_latest_event_content" bounds="[120,540][900,860]"/>',
+    '  <node class="android.widget.ImageButton" resource-id="android:id/action0" bounds="[120,880][230,940]"/>',
+    '  <node class="android.widget.ImageButton" resource-id="android:id/action1" bounds="[250,880][360,940]"/>',
+    '  <node class="android.widget.ImageButton" resource-id="android:id/action2" bounds="[380,880][490,940]"/>',
+    '  <node class="android.widget.ImageButton" resource-id="android:id/action3" bounds="[510,880][620,940]"/>',
+    '  <node class="android.widget.ImageButton" resource-id="android:id/action4" bounds="[640,880][750,940]"/>',
+    ' </node>',
+    "",
+])
+GOOD_XML_MEDIA_PAUSED = GOOD_XML.replace(
+    ' <node resource-id="com.android.systemui:id/expandableNotificationRow" bounds="[60,975]',
+    MEDIA_ROW_PAUSED + ' <node resource-id="com.android.systemui:id/expandableNotificationRow" bounds="[60,975]')
+
 GOOD_LOG = "\n".join([
     # 接管方式自报：col measure 那套断言只在 column-hook 那一版才该跑
     'notify row feature installed header-time=column-hook',
+    # 钩子入口心跳（模块每 5s 重发）：把"读不到 measure"分诊成"没跑"与"跑了但日志被冲掉"
+    'notify_row.col calls=42',
     # 独立行：整卡圆
     'notify_row.roundness phase=sep path=2 shelf=0 sum=0 child=0 pkg=a top=1.00 bot=1.00 R=54.00 radii=[54,54,54,54,54,54,54,54] mirror=1',
     # 组摘要展开：顶圆底平
@@ -485,8 +563,8 @@ GOOD_LOG = "\n".join([
     'notify_row.roundness phase=sep path=9 shelf=1 sum=0 child=0 pkg=- top=1.00 bot=1.00 R=54.00 radii=[54,54,54,54,54,54,54,54] mirror=1',
     # header 文本列：组子行被推正后的实测落点（+198 = 66dp），以及媒体行正当早退
     'notify_row.col layout line=+126 want=+198 d=72 kids=1 rowH=201 pkg=b',
-    'notify_row.col measure row=aa11 lineId=L11 line=+126 time=+198 want=+198 d=72 moved=1 rowH=201 pkg=b',
-    'notify_row.col measure row=bb22 lineId=L22 line=+198 time=+378 want=+198 d=0 moved=0 rowH=255 pkg=a',
+    'notify_row.col measure row=aa11 lineId=L11 line=+126 time=+198 want=+198 d=72 moved=1 clamp=1 rowH=201 pkg=b',
+    'notify_row.col measure row=bb22 lineId=L22 line=+198 time=+378 want=+198 d=0 moved=0 clamp=0 rowH=255 pkg=a',
     'notify_row.col skip why=not-taken pkg=com.android.bbkmusic lineId=cc33',
     'notify_row.col skip why=no-cv pkg=b lineId=L11 hop=NotificationTopLineView<RelativeLayout<FrameLayout',
     'notify_row.col skip why=summary-header pkg=b lineId=sh1 hop=TopLine<HeaderView<ChildrenContainer',
@@ -504,6 +582,10 @@ def selftest():
     cases = [
         ("baseline", GOOD_XML, GOOD_LOG, 0),
         ("媒体行不参与 L3/L4（有 SeekBar 就跳过）", GOOD_XML_MEDIA, GOOD_LOG, 0),
+        # 暂停态取证（harness 会先 dispatch pause）：这行里没有 SeekBar，判据要认得出它还是媒体行
+        ("暂停态媒体行也没有被 L3 判红", GOOD_XML_MEDIA_PAUSED, GOOD_LOG, 0),
+        ("暂停态媒体行去掉 transport 按钮就该红", GOOD_XML_MEDIA_PAUSED
+         .replace(":id/action", ":id/media_action"), GOOD_LOG, 1),
         ("图标变小", GOOD_XML.replace("[234,904]", "[216,886]")
          .replace("[234,1312]", "[216,1294]"), GOOD_LOG, 1),
         ("图标挪到 header 左上", GOOD_XML.replace("[108,778][234,904]", "[120,699][246,825]"), GOOD_LOG, 1),
@@ -547,6 +629,12 @@ def selftest():
         ("实测时间还在图标上", GOOD_XML, GOOD_LOG.replace("time=+198", "time=+126"), 1),
         ("一条实测都没有", GOOD_XML,
          "\n".join(l for l in GOOD_LOG.split("\n") if "col measure" not in l), 1),
+        ("视觉钳了还没到位", GOOD_XML, GOOD_LOG.replace("clamp=1", "clamp=2"), 1),
+        # 钩子入口心跳：没有它就只能把"读不到 measure"一律写成"钩子没跑"
+        ("没有 col calls 心跳", GOOD_XML,
+         "\n".join(l for l in GOOD_LOG.split("\n") if "col calls=" not in l), 1),
+        ("calls=0（钩子装了没跑）", GOOD_XML,
+         GOOD_LOG.replace("notify_row.col calls=42", "notify_row.col calls=0"), 1),
         # 接管方式开关：自报缺失=判红；push-only=整段停用（不能拿"0 条 measure"当回归）
         ("没自报 header-time 方式", GOOD_XML,
          "\n".join(l for l in GOOD_LOG.split("\n") if "installed header-time" not in l), 1),

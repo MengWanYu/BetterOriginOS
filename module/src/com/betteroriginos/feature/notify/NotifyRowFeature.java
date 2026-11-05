@@ -62,11 +62,15 @@ public final class NotifyRowFeature extends Feature {
     /**
      * header 时间的接管方式自报。push-only=只在事后推 translationX（col 布局钩子没装），
      * column-hook=装了布局期对位；验证器用它决定"col measure"那套断言该不该跑。
+     * 必须按**实际装没装上**自报（sColumnHook），别写死：写死过一次，装机后类不存在也照样报
+     * column-hook，门禁据此跑完整套 col 断言然后全绿 —— 那轮结论是假的。
      * 只靠 install 那一行不够：SystemUI 启动那一秒 vivo 自己刷几百行，logd 的每进程
      * 250/s 会把它整条冲掉（11-04 真机两次实测），所以补扫也按低频重发同一行。
      */
-    private static final String HEADER_TIME_MODE =
-            "notify row feature installed header-time=push-only";
+    private static String headerTimeMode() {
+        return "notify row feature installed header-time="
+                + (sColumnHook ? "column-hook" : "push-only");
+    }
     private static long sModeWitnessAt;
     private static final int LIGHT_TITLE_RAISE_DP = 8;
     private static final int LIGHT_ICON_DP = 42;
@@ -431,6 +435,8 @@ public final class NotifyRowFeature extends Feature {
             installVivoIconGuardHooks(cl);
             installWitnessHooks(cl);
             installShelfCornerHooks(cl);
+            installTopLineColumnHook(cl);
+            installSelectLayoutTimeHook(cl);
             if (OsProfile.isA13OrLower()) {
                 int mirrored = Os5Mirror.install(cl);
                 Log.i(TAG, "notify_row: os5 mirror hooks installed=" + mirrored);
@@ -440,7 +446,7 @@ public final class NotifyRowFeature extends Feature {
             // header 时间的接管方式，门禁据此决定 L10/L11（col measure 那套）该不该跑。
             // 挂在"installed"这一行而不是单开一行：单开的那一行在真机上被 logd 限流整条丢过。
             sModeWitnessAt = android.os.SystemClock.uptimeMillis();
-            Log.i(TAG, HEADER_TIME_MODE);
+            Log.i(TAG, headerTimeMode());
         } catch (Throwable t) {
             Log.e(TAG, "notify row feature install failed", t);
         }
@@ -472,6 +478,39 @@ public final class NotifyRowFeature extends Feature {
     /** 从某个视图往下找我们那枚带标记的大图标（找不到返回 null，不抛）。 */
     private static View findTag(View v) {
         return v instanceof ViewGroup ? ((ViewGroup) v).findViewWithTag(TAG_LIGHT_BIG) : null;
+    }
+
+    /**
+     * 行内的**视觉**左偏移：逐级累加 `getLeft() + translationX`，够不到 row 返回 -1。
+     * 不用 getLocationOnScreen —— 展开动画期祖先自己带位移，会把祖先的位移算成时间的位移；
+     * 也不能只累加 getLeft —— push-only 那套就是用 translationX 把时间推过去的。
+     */
+    private static int rowVisualLeft(View row, View v) {
+        int x = 0;
+        View cur = v;
+        for (int i = 0; i < 12 && cur != null && cur != row; i++) {
+            x += cur.getLeft() + Math.round(cur.getTranslationX());
+            ViewParent p = cur.getParent();
+            cur = p instanceof View ? (View) p : null;
+        }
+        return cur == row ? x : -1;
+    }
+
+    /** 一棵子树里**所有**指定 id 后缀的视图（一行同时挂着收起/展开两份 header，只取第一份会量到隐藏的）。 */
+    private static void collectIdSuffix(View v, String suffix,
+                                        java.util.List<View> out, int depth) {
+        if (v == null || depth > 12 || out.size() > 4) {
+            return;
+        }
+        if (v.getId() != 0 && viewIdName(v).endsWith(":id/" + suffix)) {
+            out.add(v);
+        }
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                collectIdSuffix(g.getChildAt(i), suffix, out, depth + 1);
+            }
+        }
     }
 
     /** 每行一帧的只读快照：大图标在不在/alpha、原生小图标可见性与 alpha、行高、当前显示哪一份根。 */
@@ -553,11 +592,58 @@ public final class NotifyRowFeature extends Feature {
                                     : "-")
                             .append(v == nat ? "*" : "");
                 }
+                // 时间的逐帧落点：header 时间在过渡帧会掉进图标列，这是 1Hz 度量量不到的
+                // 那一类（16ms 级）。一行有收起/展开两份 header，两份都量，谁在屏上谁算。
+                java.util.ArrayList<View> times = new java.util.ArrayList<>(3);
+                collectIdSuffix(child, "time", times, 0);
+                StringBuilder tms = new StringBuilder();
+                for (int k = 0; k < times.size() && k < 3; k++) {
+                    View t = times.get(k);
+                    int tx = rowVisualLeft(child, t);
+                    tms.append(k == 0 ? "" : ",")
+                            .append(Integer.toHexString(System.identityHashCode(t)))
+                            .append(":L").append(tx < 0 ? "-" : String.valueOf(tx))
+                            .append(":W").append(t.getWidth())
+                            .append(":a").append(String.format(
+                                    java.util.Locale.US, "%.2f", t.getAlpha()))
+                            .append(":v").append(t.getVisibility())
+                            .append(":s").append(t.isShown() ? "1" : "0");
+                }
+                // 大图标占的横向区间：门禁判"时间不许压在图标上"，比的是这两段真实几何
+                int bigL = big == null ? -1 : rowVisualLeft(child, big);
+                String bigGeom = big == null ? "-"
+                        : "L" + bigL + ":W" + big.getWidth() + ":s"
+                        + (big.isShown() ? "1" : "0") + ":v" + big.getVisibility()
+                        + ":d" + (big instanceof ImageView
+                                && ((ImageView) big).getDrawable() != null ? "1" : "0")
+                        + ":a" + String.format(
+                        java.util.Locale.US, "%.2f", big.getAlpha());
+                java.util.ArrayList<View> ivl = new java.util.ArrayList<>(3);
+                collectIconViews(child, ivl, 0);
+                StringBuilder ivs = new StringBuilder();
+                for (int k = 0; k < ivl.size() && k < 3; k++) {
+                    View iv = ivl.get(k);
+                    String nm = viewIdName(iv);
+                    int sl = nm.lastIndexOf('/');
+                    ivs.append(k == 0 ? "" : ",")
+                            .append(iv.getClass().getSimpleName()).append('/')
+                            .append(sl >= 0 ? nm.substring(sl + 1) : "-")
+                            .append(':').append(iv.getVisibility())
+                            .append(':').append(String.format(
+                                    java.util.Locale.US, "%.2f", iv.getAlpha()))
+                            .append(":da").append(iv instanceof ImageView
+                                    && ((ImageView) iv).getDrawable() != null
+                                    ? String.valueOf(((ImageView) iv).getDrawable().getAlpha())
+                                    : "-");
+                }
                 String state = (big == null ? "-" : (where + ":A" + String.format(
                         java.util.Locale.US, "%.2f", big.getAlpha())))
                         + "/" + (nat == null ? "-" : (nat.getVisibility()
                         + ":" + String.format(java.util.Locale.US, "%.2f", nat.getAlpha())))
                         + "/icons=" + icons
+                        + "/big=" + bigGeom
+                        + "/ivs=" + ivs
+                        + "/time=" + tms
                         + "/h" + child.getHeight()
                         + "/v" + child.getVisibility()
                         + "/ty" + (int) child.getTranslationY();
@@ -671,7 +757,17 @@ public final class NotifyRowFeature extends Feature {
             long now = android.os.SystemClock.uptimeMillis();
             if (now - sModeWitnessAt > 5000) {
                 sModeWitnessAt = now;
-                Log.i(TAG, HEADER_TIME_MODE);
+                Log.i(TAG, headerTimeMode());
+            }
+            // 布局期对位的实测落点也按低频重发：一次切歌/重排会连打几十条，logd 的每进程
+            // 限流会把整批一起冲掉，门禁于是读不到 col measure 只能报"钩子没跑"（分不清）。
+            if (now - sColBeatAt > 5000) {
+                sColBeatAt = now;
+                String beat = sColBeat;
+                Log.i(TAG, "notify_row.col calls=" + sColHookCalls);
+                if (beat != null) {
+                    Log.i(TAG, "notify_row." + beat);
+                }
             }
             for (int i = 0; i < list.getChildCount(); i++) {
                 View child = list.getChildAt(i);
@@ -1177,6 +1273,7 @@ public final class NotifyRowFeature extends Feature {
                                 "time", "id", "android");
                         if (timeId != 0 && topLine.findViewById(timeId) == null) {
                             param.setResult(null);
+                            return;
                         }
                     } catch (Throwable ignored) {
                     }
@@ -1922,10 +2019,101 @@ public final class NotifyRowFeature extends Feature {
      * 增量，于是"先跳到右边、动画一结束再推出去被卡片裁掉"（用户看到的就是一秒多后消失）。
      */
     /** 把一枚 time 推到它所在 header 的右内缩处（有箭头则停在箭头左缘）——布局坐标，纯几何。 */
-    private static void pushTimeRight(View time, String why) {
+    /**
+     * 把时间钉在**箭头左缘**这条稳定锚上（组摘要行专用，11-05 凌晨定案）。
+     *
+     * 真机逐帧读数（`betteroriginos_trace_flicker`）：组摘要行 `id=6abb4b2` 的时间
+     * f=139 L=674 → f=142 L=578 → f=149 L=674 —— 左移 96px 再闪回，就是用户报的动作。
+     * 摘举行**没有** 42dp 大图标（L7 策略），我们前面五版全部把它当"不归我们接管"跳过，
+     * 所以屡修不好：改的根本不是这一行。
+     *
+     * 为什么它自己会动：时间是流式排的最后一个子节点，位置 = 线的左 + 线的宽 − 自身宽；
+     * 而 `notification_top_line` 是 `layout_width=wrap` + `toStartOf=expand_button`，
+     * 展开动画里线的宽度跟着内容变 ⇒ 拿"线的右端"当目标就等于追一个会跑的目标。
+     * `expand_button` 是 `alignParentEnd`，它的左缘全程不动 ⇒ 这才是稳定锚。
+     *
+     * @return -1 无法摆位 / 0 本来就在锚上 / 1 钉回锚上
+     */
+    private static int anchorTimeToMaxRight(View time) {
+        try {
+            View header = time;
+            for (int i = 0; i < 6 && header != null; i++) {
+                if (header.getId() != 0 && idSuffix(header).equals("notification_header")) {
+                    break;
+                }
+                header = header.getParent() instanceof View ? (View) header.getParent() : null;
+            }
+            if (header == null || header.getWidth() <= 0 || time.getWidth() <= 0) {
+                return -1;
+            }
+            int offX = 0;
+            View cur = time;
+            for (int i = 0; i < 6 && cur != null && cur != header; i++) {
+                offX += cur.getLeft();
+                cur = cur.getParent() instanceof View ? (View) cur.getParent() : null;
+            }
+            if (cur != header) {
+                return -1;
+            }
+            long now = android.os.SystemClock.uptimeMillis();
+            int naturalRight = offX + time.getWidth();
+            long[] st = TIME_MAX_RIGHT.get(time);
+            if (st == null || now - st[1] > TIME_ANCHOR_KEEP_MS || naturalRight >= st[0]) {
+                st = new long[]{naturalRight, now, 0};
+            } else {
+                st[1] = now;
+            }
+            TIME_MAX_RIGHT.put(time, st);
+            int tx = (int) (st[0] - naturalRight);
+            if (tx <= 0) {
+                if (Math.round(time.getTranslationX()) != 0) {
+                    time.setTranslationX(0f);
+                }
+                return 0;
+            }
+            if (tx > TIME_ANCHOR_MAX_PX) {
+                return -1;   // 差太多说明算错，宁可不补，也不把时间推到看不见的位置
+            }
+            time.setTranslationX(tx);
+            return 1;
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    /**
+     * 时间的锚：它自己最近出现过的**最右自然位置**（不含我们写的位移），1500ms 内有效。
+     *
+     * 为什么不钉常量、也不钉"箭头左缘"（11-05 凌晨定案）：组摘要行静止时原生就在最右
+     *（真机 L=674、宽 178），展开动画里线宽一变化把它临时推到 L=578（左移 96px）再回来 ——
+     * 用户报的"往左跑、到左边又闪回右"就是这 96px。上一版拿 `header_button_container` 左缘
+     * 当锚，跨度确实归零了，但把稳态钉成 578：**用位置偏左换了不滑，是观感回归**。
+     * 钉"历史最右自然位置"同时满足：① 静止时自然右缘==最大值 ⇒ 位移 0，不改原生外观；
+     * ② 动画中自然位置左移 ⇒ 补一个正位移把右缘顶回去 ⇒ 不动；
+     * ③ 文本真变短（"9 小时前"→"现在"）时右缘保持、左缘右移，正是右对齐时间的原生行为。
+     * 只写**绝对** translationX ⇒ 幂等、一个主人；补位超过 300px 直接放弃（宁可不修）。
+     */
+    private static final WeakHashMap<View, long[]> TIME_MAX_RIGHT = new WeakHashMap<>();
+    private static final int TIME_ANCHOR_MAX_PX = 300;
+    private static final long TIME_ANCHOR_KEEP_MS = 1500L;
+
+    /**
+     * 是否由我们把 header 时间搬到行右端。
+     *
+     * **false 是当前选择**（11-05 晨，用户对照实验定案）：A13 原生的时间戳一直在左上槽、
+     * 展开全程不动；我们把它往右搬，而 vivo 每帧按原生把它摆回去 ⇒ 同一属性上逐帧对拉，
+     * 观感就是"从右滑到左、到左又闪回右"。十版都在加固这个搬迁，所以十版都没变化。
+     * 时间不该被钉——该让位的是我们自己加的视图（图标是我们的，摆它没人争抢）。
+     */
+    private static final boolean RELOCATE_HEADER_TIME = false;
+
+    private static int pushTimeRight(View time, String why) {
+        if (!RELOCATE_HEADER_TIME) {
+            return 0;
+        }
         try {
             if (time == null || time.getWidth() <= 0) {
-                return;
+                return -1;
             }
             View header = time;
             for (int i = 0; i < 6 && header != null; i++) {
@@ -1935,7 +2123,7 @@ public final class NotifyRowFeature extends Feature {
                 header = header.getParent() instanceof View ? (View) header.getParent() : null;
             }
             if (header == null || header.getWidth() <= 0) {
-                return;
+                return -1;
             }
             // 时间在 header 坐标系里的布局位置（逐级累加 getLeft，不含 translationX）
             int offX = 0;
@@ -1945,7 +2133,7 @@ public final class NotifyRowFeature extends Feature {
                 cur = cur.getParent() instanceof View ? (View) cur.getParent() : null;
             }
             if (cur != header) {
-                return;
+                return -1;
             }
             // 右边界：优先"文字行的右端"（OS5 就是停在箭头左侧）；行在展开态会变成 wrap 宽度，
             // 那时它等于时间自身的右缘，用它当目标就等于不推 —— 这正是"再展开单条、时间又回左边"。
@@ -1979,9 +2167,15 @@ public final class NotifyRowFeature extends Feature {
                     target = header.getWidth() - NotifyRowSpec.dp(time.getContext(), 16);
                 }
             }
-            int d = target - (offX + time.getRight());
+            // 右缘 = 在 header 系里的布局左偏移 + 自身宽度。
+            // 原来这里写成 offX + time.getRight()，而 getRight() = getLeft() + width
+            // ⇒ 左偏移被算了两遍。而 time.getLeft() 正是"随兄弟可见性每帧变化"的那个量
+            //（top_line 流式排、GONE 跳过），于是每帧的目标都在抖 ——
+            // 用户看到的"时间从右滑到左、到左又闪回右"就是这个自算出来的抖动目标，
+            // 不是 vivo 在抢写。（11-04 深夜自审 + 读数定案）
+            int d = target - (offX + time.getWidth());
             if (Math.abs(d) <= 2) {
-                return;
+                return 0;
             }
             // 直接写绝对位移：time 是一枚纯文本，没有系统自己的位移要保留。
             // 位移会让它离开"文字行"的边界（展开态的行会缩成 wrap 宽度），必须把沿途容器的
@@ -1998,9 +2192,19 @@ public final class NotifyRowFeature extends Feature {
             time.setTranslationX(d);
             hookTimeRelayout(header, time);
             timeWitness("push", "d=" + d + " target=" + target + " why=" + why, header);
+            // 回读校验（比的是真实视图状态，不是我这行算式）：还差得远就报 2
+            int off2 = 0;
+            View c4 = time;
+            for (int i = 0; i < 6 && c4 != null && c4 != header; i++) {
+                off2 += c4.getLeft();
+                c4 = c4.getParent() instanceof View ? (View) c4.getParent() : null;
+            }
+            int right = off2 + time.getWidth() + Math.round(time.getTranslationX());
+            return Math.abs(target - right) <= 3 ? 1 : 2;
         } catch (Throwable t) {
             timeWitness("throw", String.valueOf(t), time);
         }
+        return -1;
     }
 
     /**
@@ -2114,11 +2318,15 @@ public final class NotifyRowFeature extends Feature {
                 stopConverge(header);
                 return;
             }
-            int[] al = new int[2];
-            int[] rl = new int[2];
-            appName.getLocationOnScreen(al);
-            row.getLocationOnScreen(rl);
-            final int x = al[0] - rl[0];
+            // 口径与本文件的其它摆位一致：**逐级累加 getLeft**（不含 translationX、不用屏幕坐标）。
+            // 原来这里用 getLocationOnScreen 相减，过渡帧祖先正带着位移 ⇒ 同一个真实位置会量出
+            // 不同的 x，`d` 跟着抖，`shiftHeaderText` 的 `+=` 就把线的左缘加偏
+            //（真机读数 +126/+132/+565 那种"别名落点"就是这么来的）。
+            final int x = rowVisualLeft(row, appName);
+            if (x < 0) {
+                stopConverge(header);
+                return;
+            }
             int want = NotifyRowSpec.dp(row.getContext(), NotifyRowSpec.COLUMN_DP);
             final int d = want - x;
             long now = android.os.SystemClock.uptimeMillis();
@@ -2186,6 +2394,474 @@ public final class NotifyRowFeature extends Feature {
         synchronized (HEADER_CONVERGING) {
             HEADER_CONVERGING.remove(header);
         }
+    }
+
+    // ==================== 布局期文本列对位（header 时间不再有机会落到图标列） ====================
+    // 这一版 11-03 装过、当天因"大图标消失"整体回退；那个回归的根因已在 11-04 修掉
+    // （LIGHT_POLISHED 的键是 contentView，而 A13 一行有两棵根 ⇒ 标记过期 → rearmStalePolish；
+    // 原生小图标改成压 drawable alpha，不再摘 drawable），所以重上它的前提现在才成立。
+
+    /** 钩子实际装上与否：模块据此自报 header-time=column-hook / push-only，门禁决定 L10/L11 跑不跑。 */
+    private static volatile boolean sColumnHook;
+    /** onLayout 进过钩子的次数：区分"钩子装了没跑"（类不对/被子类覆盖）与"跑了但证据被 logd 冲掉"。 */
+    private static volatile int sColHookCalls;
+    /** 最近一次实测落点的整串参数，由补扫低频重发（beat 行），别只靠一次性那条。 */
+    private static volatile String sColBeat;
+    private static long sColBeatAt;
+
+    /**
+     * header 文本列对位：挂在 framework 自己的摆位出口，在**同一趟布局**里把文本子节点整体平移到
+     * COLUMN_DP（66dp），A13/A15 共用这一处。
+     *
+     * 为什么必须挂在这里（前三轮都在跟这条规则赛跑，别再退回补推）：
+     * `android.view.NotificationTopLineView.onLayout` 是**按子节点顺序从左往右流式排**、
+     * GONE 跳过（真机布局源：framework-res 的 notification_template_header.xml，A13/A15 同构）。
+     * vivo 的组子行把 `app_name_text` 收掉了，那一行只剩 `time` 一个可见子节点，
+     * 于是时间落到行首（实测 +126），正好压进 42dp 大图标占的 +48..+174。
+     * 这不是"谁把时间写歪了"，是布局规则的必然结果 —— 所以既不能用 translationX 补
+     * （vivo 每趟重排都写回 0），也不能靠延时重推（永远在跟动画抢时机）。
+     */
+    private static void installTopLineColumnHook(ClassLoader cl) {
+        try {
+            Class<?> cls = XposedHelpers.findClassIfExists(
+                    "android.view.NotificationTopLineView", cl);
+            if (cls == null) {
+                Log.i(TAG, "notify_row: top-line column hook skipped=no-class");
+                return;
+            }
+            int hits = XposedBridge.hookAllMethods(cls, "onLayout", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    alignLineIntoColumn((View) param.thisObject);
+                }
+            }).size();
+            sColumnHook = hits > 0;
+            Log.i(TAG, "notify_row: top-line column hook hits=" + hits);
+        } catch (Throwable t) {
+            Log.w(TAG, "notify_row: top-line column hook failed", t);
+        }
+    }
+
+    /**
+     * 紧跟在可见性翻转之后重摆时间 —— "加入那一帧"，而不是再加一个事后写者。
+     *
+     * RE 的帧序结论：`NotificationContentView.onLayout` 是
+     * FrameLayout.onLayout(排完所有子) → updateClipping → **selectLayout**，
+     * 也就是**翻可见性发生在布局期钩子之后**。于是布局期摆好的是"当时可见的那一枚"，
+     * 刚被 selectLayout 翻出来的另一枚沿用它当隐藏副本时的旧位置 ——
+     * 用户看到的正是"滑到左边、下一帧才被闪回右边"。
+     * 这里在 selectLayout 之后把这一行里所有**在屏上的**时间交给同一个主人
+     * （`pushTimeRight` 写绝对位移 ⇒ 幂等，重复调用只会收敛到同一目标）。
+     */
+    private static void installSelectLayoutTimeHook(ClassLoader cl) {
+        try {
+            Class<?> ncv = XposedHelpers.findClassIfExists(
+                    "com.android.systemui.statusbar.notification.row.NotificationContentView", cl);
+            if (ncv == null) {
+                Log.i(TAG, "notify_row: select-layout hook skipped=no-class");
+                return;
+            }
+            int hits = XposedBridge.hookAllMethods(ncv, "selectLayout", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        if (!(param.thisObject instanceof View)) {
+                            return;
+                        }
+                        View row = rowAncestor((View) param.thisObject);
+                        if (row == null) {
+                            return;
+                        }
+                        // 媒体行由 MediaCardFeature 独占自绘，不参与
+                        if (isMediaRow(row, null)) {
+                            return;
+                        }
+                        java.util.ArrayList<View> times = new java.util.ArrayList<>(3);
+                        collectIdSuffix(row, "time", times, 0);
+                        for (int i = 0; i < times.size(); i++) {
+                            View t = times.get(i);
+                            if (t == null || !t.isShown() || t.getWidth() <= 0) {
+                                continue;
+                            }
+                            // 被接管的行（有 42dp 图标）沿用自己的目标；
+                            // 组摘要行**没有**图标，过去被整段跳过，正是"屡提屡没改好"的那一行
+                            pushTimeRight(t, "selayout");
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }).size();
+            Log.i(TAG, "notify_row: select-layout hook hits=" + hits);
+        } catch (Throwable t) {
+            Log.w(TAG, "notify_row: select-layout hook failed", t);
+        }
+    }
+
+    /**
+     * 只搬文本列这几个子节点。`mFeedbackIcon` 不参与：vivo 用它在 top_line **自己的坐标系**里
+     * 算触摸热区（HeaderTouchListener.isInside），把它挪走等于把热区挪出图标。
+     *
+     * **`time` 与 `time_divider` 不在这个名单里**（11-04 深夜改的）：把时间搬进"对齐到 66dp 列"
+     * 这一圈，等于给它多加了一个主人 —— 同一枚 time 当时有三个写者（这里的 `c.layout()`、
+     * `pushTimeRight` 的绝对 translationX、`freezeTimeLeft` 的增量 translationX），目标还各不相同，
+     * 于是每帧左右互推：用户看到的"从右滑到左、再闪回右"就是我们自己在打。
+     * 时间只允许由**一个**主人摆位（见 `positionTime` → `pushTimeRight`）。
+     */
+    private static final String[] HEADER_TEXT_IDS = {
+            "app_name_text", "header_text", "header_text_divider",
+            "secondary_header_text", "secondary_header_text_divider", "title"};
+    private static volatile int[] sHeaderTextIds;
+    private static volatile int sTimeId;
+    private static int sColShiftWitness;
+    private static int sColMeasureWitness;
+    private static final java.util.Set<String> sColSkipWitness =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+    private static final java.util.Set<String> sColReasonWitness =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+    private static final java.util.Set<String> sColMeasureKeys =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+    /**
+     * 早退原因见证（入口级）：只打过一次的原因不重复打。
+     * 上一轮的教训是"见证只打在动作分支"，于是"钩子没跑"与"跑了但判成不用动"在日志里长得一样。
+     */
+    private static void colReason(String why, View line, View row, String extra) {
+        if (sColReasonWitness.size() >= 8) {
+            return;
+        }
+        String pkg = "-";
+        try {
+            if (row != null && sbnOf(row) != null) {
+                pkg = sbnOf(row).getPackageName();
+            }
+        } catch (Throwable ignored) {
+        }
+        String k = why + "|" + pkg;
+        if (sColReasonWitness.add(k)) {
+            Log.i(TAG, "notify_row.col skip why=" + why + " pkg=" + pkg
+                    + " lineId=" + Integer.toHexString(System.identityHashCode(line))
+                    + (extra == null ? "" : " " + extra));
+        }
+    }
+
+    /** contentViewOf 走不通时，把走到的最后一层报出来（no-cv 只有带上链路才分得清"没挂上"与"链路不同"）。 */
+    private static String contentViewTrace(View v) {
+        StringBuilder sb = new StringBuilder();
+        View cur = v;
+        for (int i = 0; i < 8 && cur != null; i++) {
+            sb.append(cur.getClass().getSimpleName());
+            ViewParent p = cur.getParent();
+            cur = p instanceof View ? (View) p : null;
+            if (cur != null) {
+                sb.append('<');
+            }
+        }
+        return "hop=" + sb;
+    }
+
+    /**
+     * 实测见证：不管这一趟有没有动手，都把"时间在行里的实际左偏移"记一帧。
+     * 验收器拿它和 66dp 常量比 —— 断言的是视图真实落点，不是我这行算式里的 want。
+     */
+    /** top_line 里那枚可见的时间子节点（id 只解析一次，onLayout 每趟都调）。 */
+    private static View findTimeChild(ViewGroup line) {
+        if (line == null) {
+            return null;
+        }
+        int timeId = sTimeId;
+        if (timeId == 0) {
+            timeId = line.getResources().getIdentifier("time", "id", "android");
+            sTimeId = timeId;
+        }
+        if (timeId == 0) {
+            return null;
+        }
+        // vivo 的行里时间**不是 top_line 的直接子节点**（真机 `col measure … time=none` 就是这么来的：
+        // 只扫直接子节点 ⇒ 我们两版钳位都没作用到屏幕上那枚时间）。
+        java.util.ArrayList<View> found = new java.util.ArrayList<>(2);
+        collectIdSuffix(line, "time", found, 0);
+        for (int i = 0; i < found.size(); i++) {
+            View c = found.get(i);
+            if (c != null && c.getVisibility() != View.GONE) {
+                return c;
+            }
+        }
+        return found.isEmpty() ? null : found.get(0);
+    }
+
+    /**
+     * 诊断：这一趟 top_line 里"谁可见、多宽、线自己在哪"。
+     * 现在的症状是**线本身在 410/565/568 之间滑**（`col measure line=+…`）——线是右对齐的，
+     * 所以任何兄弟节点的可见性或宽度一翻，线的左端就跟着动；要治就得点名是哪一枚在翻。
+     * 按内容去重 + 最短间隔 120ms（这条只在 notify_verify=1 时打，别把 logd 挤爆）。
+     */
+    private static String sLineSnapPrev;
+    private static long sLineSnapAt;
+    private static int sLineSnapLines;
+
+    private static void lineSnapshotWitness(ViewGroup line, int leftInRow) {
+        // 不挂在 sVerifyEnabled 上：那个开关是绑定期快照的，钩子里读到的常是旧值
+        //（第一次就这么丢掉整批快照读数）。改用硬上限 40 条 + 120ms 节流自保。
+        if (sLineSnapLines >= 40 || line.getChildCount() <= 0) {
+            return;
+        }
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - sLineSnapAt < 120) {
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("line=+").append(leftInRow)
+                .append(" w").append(line.getWidth()).append(" kids=");
+        for (int i = 0; i < line.getChildCount() && i < 8; i++) {
+            View c = line.getChildAt(i);
+            if (c == null) {
+                continue;
+            }
+            String id = viewIdName(c);
+            int slash = id.lastIndexOf('/');
+            sb.append(slash >= 0 ? id.substring(slash + 1) : c.getClass().getSimpleName())
+                    .append(':').append(c.getVisibility())
+                    .append(':').append(c.getWidth())
+                    .append('+');
+        }
+        String snap = sb.toString();
+        String key = Integer.toHexString(System.identityHashCode(line)) + "|" + snap;
+        if (key.equals(sLineSnapPrev)) {
+            return;
+        }
+        sLineSnapPrev = key;
+        sLineSnapAt = now;
+        sLineSnapLines++;
+        Log.i(TAG, "notify_row.col snap " + snap + " lineId="
+                + Integer.toHexString(System.identityHashCode(line)));
+    }
+
+    /**
+     * 时间的**唯一**摆位入口（11-04 深夜定案）。
+     *
+     * 之前是三个主人在同一枚 time 上打：`c.layout()`（曾被 HEADER_TEXT_IDS 里的 "time" 带进
+     * "搬到 66dp 列"那圈）、`pushTimeRight`（绝对 translationX，目标=行右缘）、
+     * `freezeTimeLeft`/pre-draw（增量 translationX，目标=它自己学的稳态）——
+     * 目标与口径都不同，每帧互相覆盖，用户看到的"从右滑到左、到左又闪回右"是我们自己在打。
+     * 现在只留 `pushTimeRight`：它写**绝对**位移，天然幂等；调用点从"事后补推若干次"改成
+     * **每趟布局都调**（真机证明展开期间 onLayout 确实每帧重跑：连点时 calls 23→99）。
+     *
+     * @return pushTimeRight 的结果码（-1=这趟没有可摆的时间）
+     */
+    private static int positionTime(View row, View line) {
+        View time = findTimeChild(line instanceof ViewGroup ? (ViewGroup) line : null);
+        if (time == null) {
+            return -1;
+        }
+        return pushTimeRight(time, "layout");
+    }
+
+
+
+    private static void colMeasure(View line, View row, int leftInRow, int want, int d, int moved,
+                                   int clamp) {
+        if (sColMeasureWitness >= 24) {
+            return;
+        }
+        View time = findTimeChild(line instanceof ViewGroup ? (ViewGroup) line : null);
+        String body;
+        if (time == null || time.getWidth() <= 0) {
+            body = "time=none";
+        } else {
+            // 量**视觉**左位（含各级祖先的 translationX）：稳态下它和布局坐标一致，
+            // 而过渡帧只有这个数代表屏幕上真正画出来的位置。
+            int vis = rowVisualLeft(row, time);
+            int off = vis < 0 ? leftInRow + time.getLeft() : vis;
+            body = "time=+" + off;
+            // 同一个落点只记一次（2px 一档），换档说明布局又动过
+            String key = Integer.toHexString(System.identityHashCode(row)) + "/" + (off / 2);
+            if (!sColMeasureKeys.add(key)) {
+                return;
+            }
+        }
+        sColMeasureWitness++;
+        String witness = "notify_row.col measure row="
+                + Integer.toHexString(System.identityHashCode(row))
+                + " lineId=" + Integer.toHexString(System.identityHashCode(line))
+                + " line=+" + leftInRow + " " + body + " want=+" + want + " d=" + d
+                + " moved=" + moved + " clamp=" + clamp + " rowH=" + row.getHeight()
+                + " pkg=" + (sbnOf(row) == null ? "-" : sbnOf(row).getPackageName());
+        // 整串留一份给补扫重发：一次性那条会被 logd 每进程限流整批冲掉，
+        // 门禁读不到就只能报"钩子没跑"，而真凶是日志通道。
+        sColBeat = witness.substring("notify_row.".length());
+        Log.i(TAG, witness);
+    }
+
+    /**
+     * 这一行里有没有我们那枚 42dp 大图标 —— 用屏幕上看得见的事实把关，不用 LIGHT_POLISHED
+     * 这类名义标志（它的键是 contentView，vivo 组子行命不中，整段对位就被跳过了）。
+     * 不做缓存：正缓存会在我们主动摘掉图标（放开这一行）之后继续误判"该管"。
+     */
+    private static boolean hasBigIconIn(View row) {
+        return findTag(row) != null;
+    }
+
+    /** 布局期把 header 文本列推到 COLUMN_DP；够不着就不动，并记下不动的原因。 */
+    private static void alignLineIntoColumn(View line) {
+        try {
+            sColHookCalls++;
+            if (!(line instanceof ViewGroup)) {
+                colReason("not-group", line, null, null);
+                return;
+            }
+            if (line.getWidth() <= 0) {
+                return;   // 这一趟还没量过，下一趟自然有值
+            }
+            View row = rowAncestor(line);
+            if (row == null) {
+                colReason("no-row", line, null, contentViewTrace(line));
+                return;
+            }
+            View cv = contentViewOf(line);
+            boolean taken = false;
+            if (cv != null) {
+                synchronized (LIGHT_POLISHED) {
+                    taken = LIGHT_POLISHED.containsKey(cv);
+                }
+                if (!taken) {
+                    synchronized (RESTYLED) {
+                        taken = RESTYLED.containsKey(cv);
+                    }
+                }
+            }
+            if (!taken) {
+                // 名义标志命不中 ≠ "这行不该管"。vivo 组子行就是这样被整段漏掉的（真机读数
+                // `col skip why=not-taken pkg=com.vivo.daemonService`），而视觉钳位在 return 之后
+                // 才做 ⇒ 时间照样压进 42dp 图标里闪。把关换成屏幕上看得见的事实：
+                // **这一行里到底有没有我们那枚大图标**；没有才按原生放行（媒体行、vivo 摊开的
+                // 组摘要头都不带它），有就必须守住"时间不落进图标列"这条几何。
+                if (!hasBigIconIn(row)) {
+                    if (cv == null) {
+                        colReason(isGroupedSummaryHeader(line) ? "summary-header" : "no-cv",
+                                line, row, contentViewTrace(line));
+                    } else {
+                        colReason("not-taken", line, row, null);
+                    }
+                    return;
+                }
+                int want = NotifyRowSpec.dp(row.getContext(), NotifyRowSpec.COLUMN_DP);
+                int clamped = positionTime(row, line);
+                if (clamped != 0) {
+                    // 只在这里打一条：这些行走的是"没有标志但有图标"的兜底路径，
+                    // 出问题时要能看出是钳住了(1)还是钳了还不到位(2)。
+                    colReason("clamp-only", line, row, "clamp=" + clamped + " want=+" + want);
+                }
+                return;
+            }
+            // 只用布局坐标逐级累加 getLeft，不用 getLocationOnScreen：
+            // 展开动画期间祖先自己带 translationX/Y，那份位移会被算进时间自己的位移。
+            int leftInRow = 0;
+            View cur = line;
+            for (int i = 0; i < 8 && cur != null && cur != row; i++) {
+                leftInRow += cur.getLeft();
+                ViewParent p = cur.getParent();
+                cur = p instanceof View ? (View) p : null;
+            }
+            if (cur != row) {
+                colReason("chain", line, row, contentViewTrace(line));
+                return;
+            }
+            final int want = NotifyRowSpec.dp(row.getContext(), NotifyRowSpec.COLUMN_DP);
+            final int d = want - leftInRow;
+            // 先留一张"这趟线里有什么"的快照：症状已经缩到"线本身在滑"，要治就得知道是谁翻的
+            lineSnapshotWitness((ViewGroup) line, leftInRow);
+            int moved = 0;
+            if (d > 2) {
+                ViewGroup g = (ViewGroup) line;
+                int maxRight = 0;
+                for (int i = 0; i < g.getChildCount(); i++) {
+                    View c = g.getChildAt(i);
+                    if (c != null && c.getVisibility() != View.GONE && isHeaderText(c)) {
+                        maxRight = Math.max(maxRight, c.getRight());
+                    }
+                }
+                int room = g.getWidth() - g.getPaddingEnd()
+                        - NotifyRowSpec.dp(row.getContext(), 8) - maxRight;
+                if (maxRight <= 0 || room < d) {
+                    // 平移会把文本推出行的右边界（被箭头压住或画到卡片外）=> 宁可不动，但要留证据
+                    if (sColSkipWitness.size() < 6) {
+                        String k = leftInRow + "|" + room;
+                        if (sColSkipWitness.add(k)) {
+                            Log.i(TAG, "notify_row.col clamp d=" + d + " room=" + room
+                                    + " lineId=" + Integer.toHexString(System.identityHashCode(line))
+                                    + " pkg=" + (sbnOf(row) == null ? "-"
+                                    : sbnOf(row).getPackageName()));
+                        }
+                    }
+                } else {
+                    for (int i = 0; i < g.getChildCount(); i++) {
+                        View c = g.getChildAt(i);
+                        if (c == null || c.getVisibility() == View.GONE || !isHeaderText(c)) {
+                            continue;
+                        }
+                        c.layout(c.getLeft() + d, c.getTop(), c.getRight() + d, c.getBottom());
+                        moved++;
+                    }
+                    // 不看 sVerifyEnabled：开关一旦为 false，修复和诊断同时失明（上一轮就是这么瞎的）。
+                    if (sColShiftWitness < 12) {
+                        sColShiftWitness++;
+                        Log.i(TAG, "notify_row.col layout line=+" + leftInRow + " want=+" + want
+                                + " d=" + d + " kids=" + moved + " rowH=" + row.getHeight()
+                                + " pkg=" + (sbnOf(row) == null ? "-"
+                                : sbnOf(row).getPackageName()));
+                    }
+                }
+            }
+            // 每帧钳位与上面的 layout 平移是两条独立的事：d<=2（按布局坐标已经够右）时上面整段
+            // 会跳过，但祖先带 translationX 时**视觉**落点照样可能压进图标列 —— 过渡帧就是这种。
+            int clamp = positionTime(row, line);
+            colMeasure(line, row, leftInRow, want, d, moved, clamp);
+        } catch (Throwable t) {
+            Log.w(TAG, "notify_row.col layout failed", t);
+        }
+    }
+
+    /** 这枚 header 是不是 vivo 分组卡的摘要头（直接挂在子行容器下面、没有内容视图那一种）。 */
+    private static boolean isGroupedSummaryHeader(View line) {
+        View cur = line;
+        for (int i = 0; i < 4 && cur != null; i++) {
+            String cn = cur.getClass().getSimpleName();
+            ViewParent p = cur.getParent();
+            if (cn.contains("NotificationHeaderView") && p instanceof View
+                    && p.getClass().getSimpleName().contains("NotificationChildrenContainer")) {
+                return true;
+            }
+            cur = p instanceof View ? (View) p : null;
+        }
+        return false;
+    }
+
+    /** 这个子节点属不属于"文本列"（id 只解析一次，onLayout 每趟都会调，别在这里查资源名）。 */
+    private static boolean isHeaderText(View c) {
+        int[] ids = sHeaderTextIds;
+        if (ids == null) {
+            android.content.res.Resources res = c.getResources();
+            int[] built = new int[HEADER_TEXT_IDS.length];
+            int n = 0;
+            for (String name : HEADER_TEXT_IDS) {
+                int id = res.getIdentifier(name, "id", "android");
+                if (id != 0) {
+                    built[n++] = id;
+                }
+            }
+            ids = java.util.Arrays.copyOf(built, n);
+            sHeaderTextIds = ids;
+        }
+        int id = c.getId();
+        if (id == 0) {
+            return false;
+        }
+        for (int v : ids) {
+            if (v == id) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -3736,6 +4412,57 @@ public final class NotifyRowFeature extends Feature {
         return "?";
     }
 
+
+    /**
+     * 顶替物是否**真的在显示**，而不是只存在。
+     * 真机逐帧读数（11-05 上午）：`row=2a04976 h=332` 我们的 42dp 图标 `big=L48:W126:s0`
+     * （在但不显示），而原生那颗 `da0`（被我们压掉）⇒ 图标位空白。
+     * 根因在 polish 里有一条 `groupChild && recycled==null → bigIcon.setAlpha(0f)`：
+     * 淡入没跑，图标就是自己抹掉的。所以"有没有顶替"必须看 isShown + alpha，
+     * 只看 findTag 会把"我们把它藏了、又把原生也藏了"当成合法状态。
+     */
+    /** 逐帧诊断用：一棵子树里所有"图标类节点"（与 collectHideTargets 的收法一致）。 */
+    private static void collectIconViews(View v, java.util.List<View> out, int depth) {
+        if (v == null || depth > 10 || out.size() > 5) {
+            return;
+        }
+        if (isIconView(v)) {
+            out.add(v);
+        }
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                collectIconViews(g.getChildAt(i), out, depth + 1);
+            }
+        }
+    }
+
+    private static boolean bigIconShowing(View root) {
+        View big = root == null ? null : findTag(root);
+        if (big == null || big.getAlpha() <= 0.5f || !big.isShown()) {
+            return false;
+        }
+        // 顶替物必须**真的有图**：`android` 这类包取不到应用图标时，我们那枚 42dp ImageView
+        // 是在、在显示，但里面没有 drawable ⇒ 压掉原生后露出的就是一个空的圆角壳
+        //（真机：vivo服务 的图标恢复了、Android 系统 的还没有，差别就在这里）。
+        if (big instanceof ImageView) {
+            ImageView iv = (ImageView) big;
+            if (iv.getDrawable() == null) {
+                // 关键一步：没有前景图的顶替图标必须**自己消失**。它带的是圆角背景，
+                // 留着就是一层空壳糊在原生图标上 —— 用户看到的"空白圆角矩形"就是这个壳
+                //（Android 系统 这类 `android` 包取不到应用图标）。有图时再自动回来。
+                if (iv.getVisibility() != View.GONE) {
+                    iv.setVisibility(View.GONE);
+                }
+                return false;
+            }
+            if (iv.getVisibility() == View.GONE) {
+                iv.setVisibility(View.VISIBLE);
+            }
+        }
+        return true;
+    }
+
     private static void suppressNativeIcon(View ni, boolean on) {
         if (ni == null) {
             return;
@@ -3790,6 +4517,15 @@ public final class NotifyRowFeature extends Feature {
             LIGHT_NATIVE_ICON.put(root, ni);
             guardLightNativeIcon(root);
         }
+        // 只有"这一行有我们那枚 42dp 大图标顶替它"才允许压。
+        // 组摘要行按策略保留原生小图标、不放大图标（L7）—— 一旦这里无差别压掉，
+        // drawable alpha=0 又没有顶替物，就是真机报的"图标变成空白边框"
+        //（Android 系统 / vivo服务 都是组摘要行）；而且下面 guardLightNativeIcon 的
+        // 每帧 pre-draw 会把它反复压回去，永不恢复。没有顶替就反过来恢复可见。
+        if (!bigIconShowing(root)) {
+            suppressNativeIcon(ni, false);
+            return;
+        }
         if (ni.getAlpha() == 0f && ni.getVisibility() != View.VISIBLE) {
             return;
         }
@@ -3825,7 +4561,16 @@ public final class NotifyRowFeature extends Feature {
             // vivo 每次重排都把这颗图标的 visibility/alpha 写回可见（逐帧见证 0:1.00），
             // 我们同通道按回去就成了逐帧对写 —— 中间那一帧就是用户看到的"小图标闪一下"。
             // 所以压制改走 scale（它从不碰那条），alpha/可见性只是顺手维持。
-            suppressNativeIcon(LIGHT_NATIVE_ICON.get(root), true);
+            View ni = LIGHT_NATIVE_ICON.get(root);
+            if (ni == null) {
+                return;
+            }
+            // 同一条纪律：只有我们放了大图标顶替的行才压；否则恢复，绝不留下空白边框
+            if (!bigIconShowing(root)) {
+                suppressNativeIcon(ni, false);
+                return;
+            }
+            suppressNativeIcon(ni, true);
         }));
     }
 
@@ -6571,11 +7316,70 @@ public final class NotifyRowFeature extends Feature {
     }
 
     /** 小图标和 OS5 展开箭头都隐藏；展开态排版与收起态不一致，iOS 卡片不提供展开箭头 */
+
+    /** 把被隐藏名单压掉的图标放回可见（alpha/可见性都恢复；vivo 自己会重绘内容）。 */
+
+    /**
+     * 是否"应用图标"这一类节点。必须与 `collectHideTargets` 的收法一致：
+     * 它既按类名 `CachingIconView` 收，也按 id `:id/icon` / `:id/left_icon` 收
+     *（真机：组摘要行那颗其实是普通 `ImageView`+`android:id/icon`，
+     * 上一版过滤只认 CachingIconView ⇒ 漏掉，图标仍被隐藏名单压掉）。
+     */
+    private static boolean isIconView(View v) {
+        if (v == null) {
+            return false;
+        }
+        if ("CachingIconView".equals(v.getClass().getSimpleName())) {
+            return true;
+        }
+        try {
+            if (v.getId() == 0) {
+                return false;
+            }
+            String name = v.getResources().getResourceName(v.getId());
+            return name != null && (name.endsWith(":id/icon") || name.endsWith(":id/left_icon"));
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static void showIconAgain(View icon) {
+        try {
+            if (icon.getAlpha() < 1f) {
+                icon.setAlpha(1f);
+            }
+            if (icon.getVisibility() == View.INVISIBLE) {
+                icon.setVisibility(View.VISIBLE);
+            }
+            if (icon instanceof ImageView && ((ImageView) icon).getDrawable() != null
+                    && ((ImageView) icon).getDrawable().getAlpha() != 255) {
+                ((ImageView) icon).getDrawable().mutate().setAlpha(255);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     private static void hideSmallIcons(View root) {
         // 带内联动作的行是例外：箭头是唯一能把动作按钮够出来的入口
         boolean keepExpand = needsExpandForActions(root);
         List<View> targets = new java.util.ArrayList<>();
         collectHideTargets(root, targets, 0, keepExpand);
+        // 没有"真的在显示的顶替图标"，就不许藏原生图标 —— 组摘要行按 L7 保留原生小图标、
+        // 不放大图标，一旦进了这份名单就是真机报的"圆角矩形空框"（图标被每帧 GUARD_TARGETS
+        // 重新压掉，只剩壳）。这里既不进名单，还要把之前压掉的恢复回来。
+        if (!bigIconShowing(root)) {
+            java.util.Iterator<View> it = targets.iterator();
+            while (it.hasNext()) {
+                View t = it.next();
+                if (t == null) {
+                    continue;
+                }
+                if (isIconView(t)) {
+                    it.remove();
+                    showIconAgain(t);
+                }
+            }
+        }
         if (keepExpand) {
             // 早一轮（行还没 attach 时）可能已把箭头压过透明，alpha 不会被原生还原
             restoreExpandButton(root, 0);

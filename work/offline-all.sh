@@ -41,6 +41,8 @@ run "A11 量化器(median-cut)"  python work/a11_quantize_selftest.py
 run "A11 量化器负对照"        python work/a11_quantize_selftest.py --negative
 run "验证器自测(正反例)"     python work/verify_os5_mirror.py --selftest
 run "行排版/圆角验证器自测"  python work/verify_row_layout.py --selftest
+# P0-1：过渡帧时间错位只能逐帧判，这套判据自己的正负例必须常驻离线
+run "逐帧时间验收自测"        python work/verify_time_frame.py --selftest
 run "Y7s 实读取证核对"       python work/y7s_a11_evidence_check.py
 run "Y7s 取证反例"          python work/y7s_a11_evidence_check.py --selftest
 # 验证器的每条正则必须还能对上源码里真实的日志串（今晚就踩过"正则对不上、fixture 自洽地绿"）
