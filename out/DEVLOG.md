@@ -3915,3 +3915,35 @@ vivo 每帧写回）。但 `guardLightNativeIcon` 注册的是**每帧 pre-draw*
 教训（已进 skill）：**借别人的资源（id/视图）就等于请了一个共同写入者；
 要么自己拥有它，要么别做"每拍补回来"的兜底循环**。
 仍待办：前景色按卡片底色亮度选族（日志里 `base=ffffffff` 配 `elapsedColor=ffffffff`）。
+
+## 2026-11-05（OS5 / A11 播放器）本轮收口 + 下一轮交接
+
+### 已验收（用户确认）
+- **切歌不再闪条/乱跳、拖动正常**（commit `4d07c1c`）：进度条改用自有 id
+  `ID_A11_SEEK`（不再借 `android.R.id.progress`）、手势由 `DragSeekBar` 自己
+  `requestDisallowInterceptTouchEvent` 拿住、`reclaimBar` 不再碰可见性。
+  两行结构试验**已回滚**（实测位置搞反），保持"时间两端、条居中"的单行。
+- **按钮/文字看不清**：① 前景色族改为**比较黑/白两族的真实对比度**取高者
+  （`A11NotifSpec.shouldUseDark`，原按"亮度>0.5"在浅桃底 `#ffd0a098` 上选了白字）；
+  ② **全部动作按钮**统一着色（原来只给 `playBtn` 设 colorFilter，切歌键在深色封面上看不到）；
+  ③ 切歌淡入**先取色后淡入**：`watchArtArrival` 用新到的封面（`pendingArtSrc`）先算调色板、
+  上色，再 `syncArt()` 起 320ms 淡入。用户实测"效果很漂亮"。
+
+### 下一轮任务：A11 收起态小播放器（用户明确要）
+
+**已逆清的关键事实**：A11 **没有**独立的紧凑布局文件；收起态走**标准紧凑通知模板**
+（小图标 + 标题/文本 + `android.compactActions` 指定的按钮），`MediaStyle` 只决定哪几个 action
+进紧凑行（`work/y7s-a11/A11-Notification-MediaStyle.java:4892/5003/5018`）；
+展开态才是 `MediaNotificationView`（`work/y7s-a11/A11-media-layout.xmltree.txt`）。
+
+**实现三步**（全在已有接管点内，不需要新钩子）：
+1. 为 `contracted` 子视图建紧凑行：圆角小封面（用**封面图**，不是应用图标）+ 标题/歌手 +
+   播放键（+ 按 `compactActions` 取的动作）；点击/展开交给系统；
+2. 颜色/按钮着色**复用展开卡那一套**（按底色对比度选族 + 全部按钮统一着色 + 先取色后淡入），
+   避免两套规则打架；
+3. 展开态保持现有整卡不动。
+
+**环境**：设备在 OS5（Android 15），装机 `ed270c969760`，`media_card_style=a11`；
+本地 `aapt2` 不在预期路径（`find` 全盘未命中），A11 SystemUI 模板数值改用
+`work/y7s-a11/` 已有转储或重装 build-tools 后再取。
+本地有未入库的改前备份 `work/NotifyRowFeature.pre-trace-1104.java`（可删）。

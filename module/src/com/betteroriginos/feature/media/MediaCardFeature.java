@@ -214,6 +214,25 @@ public final class MediaCardFeature extends Feature {
         }
     }
 
+
+    /** 给卡片里**所有**动作按钮上同一前景色。原来只给播放键设了 colorFilter，
+     *  切歌/其它按钮还留着系统默认白图标，深色封面上就"只有暂停键看得清"（真机反馈）。 */
+    private static void tintActionButtons(View v, int color) {
+        if (v == null) {
+            return;
+        }
+        if (v instanceof ImageButton) {
+            ((ImageButton) v).setColorFilter(color);
+            return;
+        }
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                tintActionButtons(g.getChildAt(i), color);
+            }
+        }
+    }
+
     private static boolean widgetSeekAvailable() {
         return sWidgetBinder != null;
     }
@@ -2071,7 +2090,18 @@ public final class MediaCardFeature extends Feature {
          * 已经是新一首；而 `controller.getMetadata()` 常常还停在上一首 —— 先读 metadata
          * 就是用户报的"左边取色是上一首歌"。两处都拿不到就返回 null（**不要**拿旧图顶着）。
          */
+        /** 新封面已到、但还没换进 ImageView 时的那张图。切歌瞬间取色必须用它：
+         *  否则 artSource() 读到的是上一首的封面 ⇒ 按钮/文字着色滞后一档，
+         *  320ms 淡入期间就是"变淡、短暂看不清"（真机反馈）。 */
+        Bitmap pendingArtSrc;
+
         Bitmap artSource() {
+            Bitmap pending = pendingArtSrc;
+            if (pending != null && !pending.isRecycled()) {
+                pendingArtSrc = null;
+                artFrom = "pending";
+                return pending;
+            }
             Bitmap fromView = viewArtBitmap(art);
             if (fromView != null) {
                 artFrom = "largeIcon";
@@ -2367,12 +2397,13 @@ public final class MediaCardFeature extends Feature {
                     total.setShadowLayer(A11NotifSpec.SEEK_TIME_SHADOW_RADIUS,
                             A11NotifSpec.SEEK_TIME_SHADOW_DX, A11NotifSpec.SEEK_TIME_SHADOW_DY, a11CardBg);
                     elapsed.setShadowLayer(0f, 0f, 0f, 0);
+                    // A11：着色时动作按钮 = getPrimaryTextColor(p)，与标题同色（§5b/§15-8）。
+                    // 必须作用于**全部**按钮：只给播放键着色会让切歌键在深色封面上消失（真机反馈）。
                     if (playBtn != null) {
                         playBtn.setBackground(null);
-                        // A11：着色时动作按钮 = getPrimaryTextColor(p)，与标题同色（§5b/§15-8）
-                        playBtn.setColorFilter(A11NotifSpec.actionIconTint(
-                                true, a11Primary, a11Primary));
                     }
+                    tintActionButtons(card, A11NotifSpec.actionIconTint(
+                            true, a11Primary, a11Primary));
                     title.setTextColor(a11Primary);
                     artist.setTextColor(a11Secondary);
                     elapsed.setTextColor(seekBase);
@@ -2965,6 +2996,11 @@ public final class MediaCardFeature extends Feature {
                 // 反过来就会先拿旧底色画一张、320ms 淡入跑到一半又被新底色那张重启
                 // （真机见证：同一次切歌里 relief color=ffffffff → 24ms 后 color=ff103808，
                 // 两条 a11 art fade 相隔 24ms）——用户看到的"还是生硬切换"就是这个重启。
+                // 先取色后画封面：把**新**封面交给取色（pendingArtSrc），
+                // 否则 refreshColors 里 artSource() 读到的还是上一首，按钮着色慢一档。
+                if (d instanceof android.graphics.drawable.BitmapDrawable) {
+                    pendingArtSrc = ((android.graphics.drawable.BitmapDrawable) d).getBitmap();
+                }
                 refreshColors(false);
                 syncArt();
             } catch (Throwable ignored) {

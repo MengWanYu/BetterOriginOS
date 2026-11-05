@@ -277,7 +277,12 @@ public final class A11NotifSpec {
         if (backgroundColor == 0) {
             return !defaultBackgroundIsDark;
         }
-        return luminance(backgroundColor) > 0.5d;
+        // 不按"亮度 > 0.5"翻族（11-05 真机反例）：浅桃底 #ffd0a098 亮度略低于 0.5，
+        // 于是选了白字，白字压浅桃只有 ~2.5:1 —— 用户看到"切歌按钮/时间看不清"。
+        // 照 A11 的 ContrastColorUtil 精神：**比较两族的实际对比度，取更高的那族**，
+        // 之后的 findAlphaToMeetContrast 再把 alpha 抬到 4.5:1（它只会加实、不会翻族）。
+        return contrast(PRIMARY_ON_LIGHT, backgroundColor)
+                >= contrast(PRIMARY_ON_DARK, backgroundColor);
     }
 
     /** 主文色（浅底用深字返回 #ff000000）。 */
