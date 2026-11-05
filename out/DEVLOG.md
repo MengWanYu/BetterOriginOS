@@ -3897,3 +3897,21 @@ vivo 每帧写回）。但 `guardLightNativeIcon` 注册的是**每帧 pre-draw*
    保留现有 `a11 seek` 见证字段，并新增"条被系统改成 4/8 时我们不再逐拍 reclaim"的说明。
 2. 待办 2 的前景选色（同时覆盖时间、按钮、标题/副文的既有 `enforceColors` 路径，避免两套规则打架）。
 3. 两条都在 OS5 真机上切歌验证；不新增门禁，沿用现有 `a11 seek` / `a11 palette` 见证读数。
+
+### 待办 1 收口（11-05 OS5）：切歌不再跳、拖动正常
+
+最终有效的是**三条**，与我最初设想的"改成两行结构"无关（两行版实测把位置搞反、时间仍偏下，已回滚）：
+
+1. **进度条用自己的 id**，不再借系统的 `android.R.id.progress`。借 id 等于把可见性交给
+   `NotificationHeaderViewWrapper`：它每趟 `selectLayout` 按自己的状态置 4/8，
+   GONE 还会连带把 `weight` 带走 → 同排零宽重测 → 两枚时间贴左、条消失
+   （真机日志 `card bar reclaimed visibility was 8 -> 0` 反复出现）。
+2. **手势自己拿**：`DragSeekBar.onTouchEvent` 按下 `requestDisallowInterceptTouchEvent(true)`、
+   抬起/取消放开 —— 不再依赖拦截器白名单，换 id 后拖动依旧正常（用户实测）。
+3. **`reclaimBar` 不再碰可见性**：换 id 后没有任何外部写入者，可见性只由
+   `applyA11SeekVisibility` 一处决定，兜底循环随之删除。
+
+用户验收：**切歌不跳、拖动正常**。装机 `22b77f4f7976`。
+教训（已进 skill）：**借别人的资源（id/视图）就等于请了一个共同写入者；
+要么自己拥有它，要么别做"每拍补回来"的兜底循环**。
+仍待办：前景色按卡片底色亮度选族（日志里 `base=ffffffff` 配 `elapsedColor=ffffffff`）。

@@ -46,6 +46,7 @@ import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
+import android.view.MotionEvent;
 import android.view.ViewGroup;
 import android.view.ViewParent;
 import android.widget.FrameLayout;
@@ -163,6 +164,9 @@ public final class MediaCardFeature extends Feature {
      * 通知行的 NotifTouchInterceptor 会把横向手势当成"滑动删除"，
      * 我们的进度条没有 AOSP 忽略名单里的 id，所以按下时必须主动请求父级不拦截。
      */
+    /** 我们自己的进度条 id（不与系统/RemoteViews 的 id 冲突）。 */
+    private static final int ID_A11_SEEK = 0x0B0A11;
+
     private static final class DragSeekBar extends SeekBar {
         DragSeekBar(Context c) {
             super(c);
@@ -198,9 +202,13 @@ public final class MediaCardFeature extends Feature {
                 Log.i("BetterOriginOS", "card seek bar DOWN enabled=" + isEnabled()
                         + " w=" + getWidth() + " h=" + getHeight());
             }
-            if (event.getActionMasked() == android.view.MotionEvent.ACTION_DOWN
-                    && getParent() != null) {
+            // 不借系统 id 之后，横向手势由这里拿住（按下禁止父级拦截、抬起/取消放开）。
+            int act = event.getActionMasked();
+            if (act == android.view.MotionEvent.ACTION_DOWN && getParent() != null) {
                 getParent().requestDisallowInterceptTouchEvent(true);
+            } else if ((act == android.view.MotionEvent.ACTION_UP
+                    || act == android.view.MotionEvent.ACTION_CANCEL) && getParent() != null) {
+                getParent().requestDisallowInterceptTouchEvent(false);
             }
             return super.onTouchEvent(event);
         }
@@ -991,6 +999,8 @@ public final class MediaCardFeature extends Feature {
         /** a11 的进度条容器（条 + 下方两枚时间），显隐按 A11 的三判据切（§15-7） */
         ViewGroup a11SeekWrap;
         long lastDurationMs;
+        /** 条是否该显示（含「有时长」）。reclaimBar 必须尊重它，否则会与系统可见性写入互打。 */
+        boolean barShouldShow = true;
         /**
          * 建卡那一拍的规格见证原文。logd 有 **每进程 250 行/秒** 的限流，SystemUI 启动/转屏
          * 那一秒 vivo 自己就刷几百行，我们夹在中间的 restyling + a11 card spec 会被整段丢掉
@@ -1010,14 +1020,32 @@ public final class MediaCardFeature extends Feature {
             if (a11SeekWrap == null) {
                 return;
             }
-            boolean show = controller != null && lastDurationMs > 0 && expanded;
-            int want = show ? View.VISIBLE : View.GONE;
+            // 行与条的显隐分开判（11-05，切歌闪条的治本）：
+            // 原来判据含「时长>0」，切歌空窗期时长未知 ⇒ 整行 GONE ⇒ 行按零宽重测 ⇒
+            // 回来时 weight=1 的条拿不到剩余宽度、两枚时间贴到左边（用户看到的现象）。
+            // A11 原生只在 onContentUpdated 里判可见性、metadata 为 null 时沿用上一首，
+            // 所以它从不参与每拍刷新。这里：行只看「有会话 && 展开」；
+            // 条没有时长时只置 INVISIBLE —— 继续占位（weight 不失效），
+            // 于是两枚时间的位置与行宽永远不变，切歌那一刻什么都不动。
+            boolean sessionOk = controller != null && expanded;
+            int wrapWant = sessionOk ? View.VISIBLE : View.GONE;
+            barShouldShow = sessionOk && lastDurationMs > 0;
+            if (bar != null) {
+                int barWant = barShouldShow ? View.VISIBLE : View.INVISIBLE;
+                if (bar.getVisibility() != barWant) {
+                    bar.setVisibility(barWant);
+                    Log.i(TAG, "a11 seek bar vis=" + barWant + " dur=" + lastDurationMs
+                            + " sessionOk=" + (sessionOk ? 1 : 0));
+                }
+            }
+            int want = wrapWant;
             if (a11SeekWrap.getVisibility() == want) {
                 return;
             }
             a11SeekWrap.setVisibility(want);
             Log.i(TAG, "a11 seek vis=" + want + " expanded=" + (expanded ? 1 : 0)
-                    + " session=" + (controller != null ? 1 : 0) + " dur=" + lastDurationMs);
+                    + " session=" + (controller != null ? 1 : 0)
+                    + " dur=" + lastDurationMs + " bar=" + (barShouldShow ? 1 : 0));
             // 容器进出会改变内容列高度 ⇒ 封面正方形要跟着重量一次
             card.post(() -> {
                 try {
@@ -1374,7 +1402,11 @@ public final class MediaCardFeature extends Feature {
             // 导致发通知的音乐 App 被判 BadForegroundServiceNotification 直接闪退）。
             // 换用 systemui 私有 progress_bar id 可以躲开这次改写，但那个 id 是否在滑动忽略
             // 名单里未经验证，换错就吃掉刚修好的拖动手势，所以保持借 android.R.id.progress。
-            bar.setId(android.R.id.progress);
+            // 不再借系统自己的 android.R.id.progress（11-05）：借了 id 就等于把可见性
+            // 交给 NotificationHeaderViewWrapper —— 它每趟 selectLayout 会按自己的状态把
+            // 「它的」条置 4/8，GONE 还会连带 weight 一起失效。手势改由 DragSeekBar 自己
+            // 在 ACTION_DOWN 里 requestDisallowInterceptTouchEvent 拿住，不再依赖 id 白名单。
+            bar.setId(ID_A11_SEEK);
             bar.setMax(1);
             bar.setProgress(0);
             bar.setSplitTrack(false);
@@ -2957,10 +2989,9 @@ public final class MediaCardFeature extends Feature {
             try {
                 boolean a11 = "a11".equals(style);
                 float want = (a11 || canSeek) ? 1f : 0.85f;
-                if (bar.getVisibility() != View.VISIBLE) {
-                    Log.i(TAG, "card bar reclaimed visibility was " + bar.getVisibility());
-                    bar.setVisibility(View.VISIBLE);
-                }
+                // 可见性不再在这里碰（11-05）：换了自己的 id 之后没有任何外部写入者
+                // 会改这根条，`reclaimBar` 只负责 alpha/可拖状态；可见性由
+                // applyA11SeekVisibility 一处决定。
                 if (Math.abs(bar.getAlpha() - want) > 0.01f) {
                     bar.setAlpha(want);
                 }
