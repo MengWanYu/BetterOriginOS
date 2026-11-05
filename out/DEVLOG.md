@@ -3859,3 +3859,41 @@ vivo 每帧写回）。但 `guardLightNativeIcon` 注册的是**每帧 pre-draw*
   分清楚它是 `vis=8`（被 GONE）、`alpha=0` 还是 `da0`（被压）——三种对应三种修法，不猜。
 - 逐帧通道新增字段 `ivs=`（屏上所有图标类节点的 类/id/可见性/alpha/drawableAlpha）与
   `big=` 的 `:v`/`:d` 两位，作为常备诊断（按状态变化打印，不刷屏）。
+
+## 2026-11-05（OS5 / A11 播放器）两条待办 —— 已定位，等"开工"
+
+设备已切到 OS5（Android 15 / OriginOS 15.0，DSU 未运行），`media_card_style=a11`，
+装机 `727198fc38a5`。用户实测两件事仍存在，日志已给出直接证据。
+
+### 待办 1（P1）：切歌瞬间进度条短暂消失、两枚时间跑到左边
+
+**证据（`work/z8os3-live/os5-seek.log`，同名文件已含切歌窗口）**：
+- 切歌期间**没有** `media bind` / `restyling` ⇒ 卡片没有被重建，不是"重建空帧"。
+- 反复出现 `card bar reclaimed visibility was 4 -> 0` 与 **`8 -> 0`**：
+  系统（`NotificationHeaderViewWrapper`，因为我们**借了 `android.R.id.progress`**）
+  每趟 `selectLayout` 把我们那根条置 INVISIBLE/GONE，`reclaimBar` 每拍才补回来。
+  **GONE 会把 `weight=1` 一起带走** ⇒ 这一排按零宽重测 ⇒ 两枚 `wrap_content` 时间贴到左边
+  ⇒ 下一拍 reclaim 回来 ⇒ 用户看到"条短暂消失、时间跑左边再回来"。
+- 我上一版加的"行与条分开判 + 条只 INVISIBLE 仍占位"没解决，因为系统的写入里包含 **8(GONE)**。
+
+**修法（建议，按原生结构，不再和系统抢 id）**：
+把这一排改成 A11 原生结构 —— **条独占一整行（满宽）**，**两枚时间在条下方另一行**左右贴边；
+条无论被系统藏成 4 还是 8，都在它自己那一行里，**结构上不可能把两枚时间挤到一起**。
+备选（快但风险高）：换掉借来的 `android.R.id.progress` 并自己接管横向手势
+（那个 id 是否在 `NotifTouchInterceptor` 白名单里未验证，换错会吃掉拖动手势）。
+
+### 待办 2（P1）：深色/浅色背景下，切歌按钮与文字看不清
+
+**证据（同一份日志）**：`base=ffffffff`（白卡）配 `elapsedColor=ffffffff` / `totalColor=ffffffff`
+（白字压白底）。取色链在"卡片底色"和"前景色"上分叉了。
+
+**修法**：按**卡片底色的亮度**选前景（浅底→深字、深底→浅字），动作按钮沿用同一前景色；
+对比度用 A11 原生的抬 alpha 手法（`findAlphaToMeetContrast` 只在 [当前 alpha,255] 二分，
+只加实、不调淡），不要跟着封面取色走。断言改为"按底色重算出的前景色"而不是常量。
+
+### 开工顺序
+
+1. 待办 1 的结构改造（改动集中在 `MediaCardFeature` 里建 a11 seek 排的那段），
+   保留现有 `a11 seek` 见证字段，并新增"条被系统改成 4/8 时我们不再逐拍 reclaim"的说明。
+2. 待办 2 的前景选色（同时覆盖时间、按钮、标题/副文的既有 `enforceColors` 路径，避免两套规则打架）。
+3. 两条都在 OS5 真机上切歌验证；不新增门禁，沿用现有 `a11 seek` / `a11 palette` 见证读数。
