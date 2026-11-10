@@ -4266,3 +4266,27 @@ ImageView，探到即接管：GONE + 挂防闪守卫 + 作废封面指纹）。�
 offline-all 24 项绿；a11 卡结构 dump（texts=[80,412] a11 位、header 行、无源图标动作排）；
 每轨取色 bg 非黑；os5 卡换歌守卫日志。另：面板空闲时 screencap 会拿到**旧帧**
 （视图树已更新、无重绘触发）——验证一律以 dump+日志为准，截图可能滞后一首歌。
+
+## 2026-11-11（上午续）"切到奢香夫人左边还是黑"——三段根因链闭环
+
+第一轮修复（art=null 重探、守卫全样式、rediscover）之后用户复测仍黑。逐层取证：
+
+1. **浮雕用了黑底**：bindSession 的顺序是 syncArt → refreshColors（我把强制重取色
+   插在了 syncArt 后面）——浮雕拿建卡时的黑底画一张（`relief color=ff000000`，
+   真机 07:00:11 栈），之后封面指纹不变就没人再触发 syncArt，黑左底陪伴整首歌。
+   修：bindSession 改成先取色后画封面（与 watchArtArrival 同序）。
+2. **TransitionDrawable 冻结**：它只在被绘制时推进——闲置面板没有后续绘制，
+   过渡冻结在第 0 帧（旧底/黑），视图树里新底色早就就位（dump 证实文字已同步而
+   像素还是黑）。修：过渡后 `postInvalidateDelayed` 补终帧绘制（卡片底色 + 封面
+   淡入两处都补）。
+3. **sweep 永久拉黑**：`sweep empty-actions`（我上一批加的守卫）会把 root 记进
+   SKIP_LOGGED，而 sweep 循环按 alreadySkipped 直接跳过——剥行重建后的新内容
+   从此补挂不上，可见行只剩原生新内容盖在旧卡上。修：sweep 循环只挡 known，
+   瞬态 skip 允许重试（skipOnce 仍去重日志）。
+
+### 验收
+- 搀扶（藏青 000040）：左底像素 (1,1,65) vs 取色 ff000040 —— 1/255 一致；
+- 奢香夫人（米白 f0f0e8）：日志 relief color=fff0f0e8 两步收敛（黑→正确，间隔 240ms）；
+- offline-all 24 项绿。
+- 教训：截图帧与视图树可能差整整一拍（冻结的过渡 + 闲置面板不重绘），
+  验证永远以 dump+日志+同帧像素三件套对齐，单看截图会被骗两轮。

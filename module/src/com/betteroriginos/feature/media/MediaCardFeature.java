@@ -541,14 +541,13 @@ public final class MediaCardFeature extends Feature {
                         }
                         for (View v : found) {
                             boolean known;
-                            boolean alreadySkipped;
                             synchronized (CARDS) {
                                 known = CARDS.containsKey(v);
                             }
-                            synchronized (SKIP_LOGGED) {
-                                alreadySkipped = SKIP_LOGGED.contains(v);
-                            }
-                            if (known || alreadySkipped) {
+                            // 只挡 known；瞬态 skip（如"动作按钮还没投完"）必须允许重试——
+                            // 曾把 empty-actions 的根永久拉黑（SKIP_LOGGED），剥行重建后
+                            // 卡片从此补挂不上，可见行只剩原生新内容盖在旧卡上（真机 06:42 序列）。
+                            if (known) {
                                 continue;
                             }
                             Log.i(TAG, "media sweep attach cls=" + v.getClass().getName());
@@ -2829,6 +2828,10 @@ public final class MediaCardFeature extends Feature {
                     td.setCrossFadeEnabled(true);
                     card.setBackground(td);
                     td.startTransition(320);
+                    // TransitionDrawable 只在被绘制时推进：闲置面板没有后续绘制，
+                    // 过渡冻结在第 0 帧（旧底/黑），用户看到的就是"切歌后左边黑"。
+                    // 过渡结束后补一次 invalidate，画到终态（真机 06:5x 帧对照证实）。
+                    card.postInvalidateDelayed(340);
                 } else {
                     card.setBackground(newBg);
                 }
@@ -3015,6 +3018,8 @@ public final class MediaCardFeature extends Feature {
                     td.setCrossFadeEnabled(true);
                     artView.setImageDrawable(td);
                     td.startTransition(A11NotifSpec.ART_FADE_MS);
+                    // 同卡片背景：闲置面板下过渡冻结在第 0 帧，补一次终帧绘制
+                    artView.postInvalidateDelayed(A11NotifSpec.ART_FADE_MS + 20);
                     Log.i(TAG, "a11 art fade mode=cross ms=" + A11NotifSpec.ART_FADE_MS);
                     return;
                 }
@@ -3184,6 +3189,10 @@ public final class MediaCardFeature extends Feature {
                                 + ":" + (art.getDrawable() == null ? "empty" : "ok")));
                 applyPalette(animate, src);
                 lastTrackKey = key;
+                // 底色刚更新：补一次 syncArt，浮雕（用 a11CardBg 当左缘色）与底色
+                // 永远成对，不依赖任何调用方记得"先取色后画封面"的顺序。
+                // syncArt 自身有 hash+bg 双条件幂等门，同图同底色时零成本。
+                syncArt();
             } catch (Throwable t) {
                 Log.w(TAG, "refreshColors failed", t);
             }
@@ -3522,11 +3531,14 @@ public final class MediaCardFeature extends Feature {
                         + (chosen.getPlaybackState() == null ? -1 : chosen.getPlaybackState().getState()));
                 controller = chosen;
                 updateSourceIcon();
-                syncArt();
                 // 启动竞态自愈：建卡那一拍会话服务还没起（palette 黑底兜底、duration=0），
-                // 现在控制器才绑上，而元数据没变就不会再有回调 —— 作废 trackKey 强制重取色
+                // 现在控制器才绑上，而元数据没变就不会再有回调 —— 作废 trackKey 强制重取色。
+                // 顺序必须是**先取色后画封面**（与 watchArtArrival 同序）：
+                // 反过来浮雕会拿建卡时的黑底画一张（a11CardBg 尚未更新），
+                // 而封面指纹不变就没人再触发 syncArt —— 黑左底陪伴整首歌（真机 07:00 栈）。
                 lastTrackKey = "";
                 refreshColors(false);
+                syncArt();
                 chosen.registerCallback(callback, handler);
                 updateSeekable();
                 updateProgress();
