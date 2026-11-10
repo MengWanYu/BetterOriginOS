@@ -203,8 +203,12 @@ public final class CameraShutterFeature extends Feature {
                     synchronized (LAST_NAME) {
                         name = LAST_NAME.get(v);
                     }
-                    // 布局默认那颗就是拍照态；只有明确判到非拍照态才交还原生
-                    boolean photo = name == null || name.startsWith(PHOTO_ICON_PREFIX);
+                    // 布局默认那颗就是拍照态；只有明确判到非拍照态才交还原生。
+                    // OS4 相机切模式不走 setImage*（图标 hooks 全链 0 命中），LAST_NAME
+                    // 恒空，只靠"布局默认=拍照态"会把录像态也接管 —— 快门的无障碍
+                    // 描述随模式/状态变（真机：录像态="开始录制，按钮…"），拿它兜底否决。
+                    boolean photo = (name == null || name.startsWith(PHOTO_ICON_PREFIX))
+                            && !recordingByDesc(v);
                     boolean paint = photo && isEnabled(ctx);
                     if (v instanceof ImageView) {
                         int want = paint ? 0 : 255;
@@ -252,6 +256,16 @@ public final class CameraShutterFeature extends Feature {
         }
         String name = entryName(v.getResources(), ((Integer) args[0]).intValue());
         return name == null || name.isEmpty() ? null : name;
+    }
+
+    /** 提到录制/录像（开始录制/停止录制/录像中，含英文 Record）都算录像链路，还原生 */
+    private static boolean recordingByDesc(View v) {
+        CharSequence d = v.getContentDescription();
+        if (d == null) {
+            return false;
+        }
+        String s = d.toString();
+        return s.contains("录制") || s.contains("录像") || s.contains("Record");
     }
 
     /**
@@ -309,6 +323,7 @@ public final class CameraShutterFeature extends Feature {
                 + CameraShutterSpec.describe(ring.lastOuterPx(), ring.lastInnerPx(),
                         ring.lastRingPx(), w)
                 + " icon=" + (name == null ? "layout-default" : name)
+                + " desc=" + v.getContentDescription()
                 + " id=" + Integer.toHexString(System.identityHashCode(v))
                 + " painted=" + sPainted + " hidden=" + sHidden);
     }

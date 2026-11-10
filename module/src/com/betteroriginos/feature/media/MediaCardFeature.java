@@ -79,6 +79,9 @@ public final class MediaCardFeature extends Feature {
     private static final String TAG = "BetterOriginOS";
     private static final Map<View, MediaCard> CARDS = new WeakHashMap<>();
 
+    /** 选项监听要用实例方法重建卡片；install 时记下唯一实例（每进程一个 Feature 实例） */
+    private static volatile MediaCardFeature sSelf;
+
     /** 不可拖动时吞掉触摸。A11 本体靠 `setEnabled(false)`；这里两者一起做，避免手势穿到下层。 */
     private static final android.view.View.OnTouchListener CONSUME_TOUCH = (v, event) -> true;
 
@@ -344,6 +347,7 @@ public final class MediaCardFeature extends Feature {
 
     @Override
     public void install(ClassLoader cl) {
+        sSelf = this;
         try {
             Class<?> c = XposedHelpers.findClass(
                     "com.android.systemui.statusbar.notification.row.NotificationContentView", cl);
@@ -464,6 +468,7 @@ public final class MediaCardFeature extends Feature {
 
     private static long sLastSweepAt;
     private static boolean sTreeDumped;
+    private static long sLastTreeDumpAt;
 
     /** 找不到媒体视图时把子树摊出来：类名与深度都只能从现场拿 */
     private static void dumpTree(View v, StringBuilder sb, int depth) {
@@ -497,16 +502,42 @@ public final class MediaCardFeature extends Feature {
                     }
                     sLastSweepAt = now;
                     try {
+                        // 先清孤儿：重绑会换掉整棵 child 子树，旧 root 已不在窗口，
+                        // 留着只会被 refreshColors 盲刷（OS4 真机：bbkmusic 每首歌换一次通知）
+                        java.util.List<View> orphans = new java.util.ArrayList<>();
+                        synchronized (CARDS) {
+                            for (View k : CARDS.keySet()) {
+                                if (!k.isAttachedToWindow()) {
+                                    orphans.add(k);
+                                }
+                            }
+                        }
+                        for (View k : orphans) {
+                            MediaCard mc;
+                            synchronized (CARDS) {
+                                mc = CARDS.remove(k);
+                            }
+                            if (mc != null) {
+                                mc.release();
+                            }
+                        }
                         ViewGroup list = (ViewGroup) param.thisObject;
                         java.util.List<View> found = new java.util.ArrayList<>();
                         for (int i = 0; i < list.getChildCount(); i++) {
                             collectMediaViews(list.getChildAt(i), found, 0);
                         }
-                        if (found.isEmpty() && !sTreeDumped && list.getChildCount() > 0) {
-                            sTreeDumped = true;
-                            StringBuilder sb = new StringBuilder();
-                            dumpTree(list.getChildAt(0), sb, 0);
-                            Log.i(TAG, "media sweep found nothing; row0 tree:" + sb);
+                        if (found.isEmpty() && list.getChildCount() > 0) {
+                            // 行存在却匹配不上：把首行的类树摊出来。旧版"每进程一次"在
+                            // OS4 上不够用——静默区行关面板后会被 vivo 换成另一套容器，
+                            // 卡片随面板关闭被孤儿清理，重开面板时若新容器不匹配就永远
+                            // 没人补挂（真机 01:17-01:20 序列）。按 15s 限频反复摊。
+                            long now2 = android.os.SystemClock.uptimeMillis();
+                            if (now2 - sLastTreeDumpAt > 15000) {
+                                sLastTreeDumpAt = now2;
+                                StringBuilder sb = new StringBuilder();
+                                dumpTree(list.getChildAt(0), sb, 0);
+                                Log.i(TAG, "media sweep found nothing; row0 tree:" + sb);
+                            }
                         }
                         for (View v : found) {
                             boolean known;
@@ -549,7 +580,7 @@ public final class MediaCardFeature extends Feature {
         Log.w(TAG, "media sweep: no list class matched");
     }
 
-    /** 只认 MediaNotificationView 本身：卡片要加在它里面，别的容器不行 */
+    /** 只认媒体模板根：类名（OS5/OS3）或探测组合（OS4 展开态）命中即可，卡片要加在它里面 */
     private static void collectMediaViews(View v, java.util.List<View> out, int depth) {
         if (v == null || depth > 7) {
             return;
@@ -561,19 +592,29 @@ public final class MediaCardFeature extends Feature {
             out.add(v);
             return;
         }
-        if (v instanceof ViewGroup) {
-            ViewGroup g = (ViewGroup) v;
-            for (int i = 0; i < g.getChildCount(); i++) {
-                collectMediaViews(g.getChildAt(i), out, depth + 1);
-            }
+        if (!(v instanceof ViewGroup)) {
+            return;
+        }
+        ViewGroup g = (ViewGroup) v;
+        int before = out.size();
+        for (int i = 0; i < g.getChildCount(); i++) {
+            collectMediaViews(g.getChildAt(i), out, depth + 1);
+        }
+        // OS4：展开态模板根没有类名/媒体 id 可认——先递归保证取最内层，
+        // 子树里没有任何更内层的媒体根、而自己能同时探测出 actions+title 才算模板根
+        if (out.size() == before && discoverMedia(g.getContext(), g).complete()) {
+            out.add(g);
         }
     }
     private static final java.util.Set<View> SKIP_LOGGED =
             java.util.Collections.newSetFromMap(new java.util.WeakHashMap<View, Boolean>());
 
     /**
-     * 每个视图只报一次早退原因（避免刷屏），但一定要报：
+     * 每个视图只报一次早退原因，但一定要报：
      * "媒体卡没出现"过去完全没有线索，只能靠猜（实测踩过 20 分钟）。
+     * 以前只报类名含 "Media" 的根——OS4（Funtouch 14.1）媒体模板根是普通
+     * FrameLayout/LinearLayout，那条过滤把真正的媒体行 skip 吞成了静默，
+     * 移植期间一无所见。改成全量（每根实例一条，WeakHashMap 去重兜住量）。
      */
     private static void skipOnce(String why, View root) {
         synchronized (SKIP_LOGGED) {
@@ -581,10 +622,8 @@ public final class MediaCardFeature extends Feature {
                 return;
             }
         }
-        // 只有媒体视图才值得记：普通通知行没有 media_actions 是正常情况，别刷屏
-        if (root.getClass().getName().contains("Media")) {
-            Log.i(TAG, "media restyle skip " + why + " cls=" + root.getClass().getName());
-        }
+        Log.i(TAG, "media restyle skip " + why + " cls=" + root.getClass().getName()
+                + " pkg=" + root.getContext().getPackageName());
     }
 
     /**
@@ -612,6 +651,100 @@ public final class MediaCardFeature extends Feature {
         return null;
     }
 
+    /** restyle 与补扫共用的媒体视图探测结果：complete() 才值得建卡 */
+    private static final class MediaViews {
+        ViewGroup actions;
+        TextView title;
+        TextView artist;
+        ImageView art;
+        ImageView sourceIcon;
+        int headerId;
+        /** 识别路径，进见证：id=老模板 / fallback=展开态 MediaStyle 模板 */
+        String how = "none";
+
+        boolean complete() {
+            return actions != null && title != null;
+        }
+    }
+
+    /**
+     * 媒体模板探测（OS4 适配）：OS5/OS3 的模板（collapsed=notification_media_content 族）
+     * 靠 media_actions/title id 就能认；OS4（Funtouch 14.1）的**展开态**是 framework
+     * MediaStyle 族（action0..4、无 media_actions、artwork 无 id）——逐级兜底：
+     * actions = media_actions → action0 的父容器；art = right_icon → 子树里最大的
+     * 方形 ImageView（排除小图标）。任何一级命中老 id 就走老路径，零回归。
+     */
+    private static MediaViews discoverMedia(Context ctx, View root) {
+        MediaViews mv = new MediaViews();
+        int actionsId = id(ctx, "media_actions");
+        int titleId = id(ctx, "title");
+        int textId = id(ctx, "text");
+        int artId = id(ctx, "right_icon");
+        mv.headerId = id(ctx, "notification_header");
+        int iconId = id(ctx, "icon");
+        if (titleId != 0) {
+            mv.title = root.findViewById(titleId);
+        }
+        if (textId != 0) {
+            mv.artist = root.findViewById(textId);
+        }
+        if (actionsId != 0) {
+            mv.actions = root.findViewById(actionsId);
+        }
+        if (mv.actions != null) {
+            mv.how = "id";
+        }
+        if (mv.actions == null) {
+            // 展开态 MediaStyle：动作按钮挂在 action0..4，取 action0 的父容器
+            int a0 = id(ctx, "action0");
+            View v = a0 == 0 ? null : root.findViewById(a0);
+            if (v != null && v.getParent() instanceof ViewGroup) {
+                mv.actions = (ViewGroup) v.getParent();
+                mv.how = "action0";
+            }
+        }
+        if (artId != 0) {
+            mv.art = root.findViewById(artId);
+        }
+        if (mv.art == null) {
+            mv.art = largestArtView(root);
+        }
+        if (iconId != 0) {
+            mv.sourceIcon = root.findViewById(iconId);
+        }
+        return mv;
+    }
+
+    /** 展开态模板的封面没有 id：子树里"最大的、有内容的、宽≥高的 ImageView"就是它 */
+    private static ImageView largestArtView(View root) {
+        if (!(root instanceof ViewGroup)) {
+            return null;
+        }
+        ImageView best = null;
+        long bestArea = 0;
+        java.util.Deque<View> stack = new java.util.ArrayDeque<>();
+        stack.push(root);
+        while (!stack.isEmpty()) {
+            View v = stack.pop();
+            if (v instanceof ImageView && v.getWidth() > 0 && v.getHeight() > 0) {
+                ImageView iv = (ImageView) v;
+                long area = (long) v.getWidth() * v.getHeight();
+                if (area > bestArea && v.getWidth() >= v.getHeight()
+                        && iv.getDrawable() != null) {
+                    best = iv;
+                    bestArea = area;
+                }
+            }
+            if (v instanceof ViewGroup) {
+                ViewGroup g = (ViewGroup) v;
+                for (int i = 0; i < g.getChildCount(); i++) {
+                    stack.push(g.getChildAt(i));
+                }
+            }
+        }
+        return best;
+    }
+
     /** @param expanded 收起态/展开态（A11 两条取色链不同）；null 表示沿用已有状态 */
     private void restyle(View root, Boolean expanded) {
         if (!(root instanceof ViewGroup)) {
@@ -624,33 +757,46 @@ public final class MediaCardFeature extends Feature {
             skipOnce("disabled", root);
             return;
         }
-        int actionsId = id(ctx, "media_actions");
-        int titleId = id(ctx, "title");
-        int textId = id(ctx, "text");
-        int artId = id(ctx, "right_icon");
-        int headerId = id(ctx, "notification_header");
-        int iconId = id(ctx, "icon");
-        if (actionsId == 0 || titleId == 0) {
-            skipOnce("no-ids actionsId=" + actionsId + " titleId=" + titleId, root);
-            return;
-        }
-        ViewGroup actions = root.findViewById(actionsId);
-        TextView title = root.findViewById(titleId);
-        TextView artist = root.findViewById(textId);
-        ImageView art = root.findViewById(artId);
-        ImageView sourceIcon = iconId == 0 ? null : (ImageView) root.findViewById(iconId);
-        if (actions == null || title == null) {
-            skipOnce("actions=" + (actions == null ? "null" : "ok")
+        MediaViews mv = discoverMedia(ctx, root);
+        ViewGroup actions = mv.actions;
+        TextView title = mv.title;
+        TextView artist = mv.artist;
+        ImageView art = mv.art;
+        ImageView sourceIcon = mv.sourceIcon;
+        int headerId = mv.headerId;
+        if (!mv.complete()) {
+            skipOnce("discover=" + mv.how
+                    + " actions=" + (actions == null ? "null" : "ok")
                     + " title=" + (title == null ? "null" : "ok"), root);
             return;
         }
+        if (actions.getChildCount() == 0 && expanded == null) {
+            // 补扫路径：动作按钮还没被 RemoteViews 装上就建卡 = 一张没有按钮的废卡
+            //（真机 00:46 实测 actions=0 也建了）。等 setter 路径来建。
+            skipOnce("sweep empty-actions", root);
+            return;
+        }
         Boolean role = expanded != null ? expanded : childRoleOf(root);
+        String style = option(ctx, "style", "os5");
         synchronized (CARDS) {
             MediaCard existing = CARDS.get(root);
             if (existing != null) {
-                existing.setState(role);
-                existing.refreshColors(true);
-                return;
+                boolean detached = existing.card.getParent() == null;
+                boolean styleChanged = !existing.style.equals(style);
+                if (!detached && !styleChanged) {
+                    existing.setState(role);
+                    existing.refreshColors(true);
+                    return;
+                }
+                // 卡视图被摘走（孤儿）或样式换了：拆掉重建。destroy 会把 title/artist/
+                // 按钮归还回模板原位，下面的探测/建卡流程照常工作。
+                boolean alive = existing.destroy();
+                CARDS.remove(root);
+                if (!alive) {
+                    return;
+                }
+                Log.i(TAG, "media card rebuild root=" + root.getClass().getName()
+                        + " style=" + style + (styleChanged ? " (style changed)" : " (orphan)"));
             }
         }
         sLastTitle = title.getText();
@@ -662,7 +808,6 @@ public final class MediaCardFeature extends Feature {
             sLastSourcePkg = sourceIcon.getContentDescription() == null
                     ? null : sourceIcon.getContentDescription().toString();
         }
-        String style = option(ctx, "style", "os5");
         Log.i(TAG, "restyling style=" + style + " " + root.getClass().getName()
                 + " title=" + title.getText() + " actions=" + actions.getChildCount()
                 + " role=" + (role == null ? "unknown" : role.booleanValue() ? "expanded" : "contracted")
@@ -750,9 +895,50 @@ public final class MediaCardFeature extends Feature {
                             }
                         }
                     });
+            // 样式选项即时生效：OS4 上重绑稀疏（bbkmusic 只在换歌时更新通知），
+            // 等"下次换歌"用户要等一分钟以上才能看到新样式。监听选项键，
+            // 拆掉旧卡按新样式重建（destroy 会把 title/按钮还回模板，重建无损）。
+            sysui.getContentResolver().registerContentObserver(
+                    Settings.Global.getUriFor(Prefs.optionKey("media_card", "style")), false,
+                    new ContentObserver(new Handler(Looper.getMainLooper())) {
+                        @Override
+                        public void onChange(boolean selfChange) {
+                            try {
+                                MediaCardFeature self = sSelf;
+                                if (self != null) {
+                                    self.forceRestyleAll("style option changed");
+                                }
+                            } catch (Throwable t) {
+                                Log.w(TAG, "media_card: style switch failed", t);
+                            }
+                        }
+                    });
         } catch (Throwable t) {
             Log.e(TAG, "preview observer register failed", t);
         }
+    }
+
+    /** 拆掉全部旧卡并按当前选项重建；root 已离开窗口的直接丢弃 */
+    void forceRestyleAll(String why) {
+        java.util.List<View> roots;
+        synchronized (CARDS) {
+            roots = new java.util.ArrayList<>(CARDS.keySet());
+        }
+        int rebuilt = 0, dropped = 0;
+        for (View root : roots) {
+            MediaCard mc;
+            synchronized (CARDS) {
+                mc = CARDS.remove(root);
+            }
+            boolean alive = mc != null && mc.destroy();
+            if (alive && root instanceof ViewGroup && root.isAttachedToWindow()) {
+                restyle(root, null);
+                rebuilt++;
+            } else {
+                dropped++;
+            }
+        }
+        Log.i(TAG, "force restyle all " + why + " rebuilt=" + rebuilt + " dropped=" + dropped);
     }
 
     private static final String EXPAND_DEBUG_KEY = "betteroriginos_notify_expand_test";
@@ -991,8 +1177,12 @@ public final class MediaCardFeature extends Feature {
     }
 
     private static boolean isNight(Context ctx) {
-        return (ctx.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
-                == Configuration.UI_MODE_NIGHT_YES;
+        // 通知视图的 context 是发起 app 的 createPackageContext（OS4 上 bbkmusic 带
+        // 浅色 uiMode），而卡片贴在 SystemUI 的深色面板里——明暗必须问面板（SystemUI
+        // 上下文），否则 os5/material 出"暖黑底 + 深棕字"（真机 01:38 实测 title 不可见）。
+        Context sysui = sysuiContext(ctx);
+        Configuration cfg = (sysui != null ? sysui : ctx).getResources().getConfiguration();
+        return (cfg.uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
     }
 
     static final class MediaCard {
@@ -1164,7 +1354,7 @@ public final class MediaCardFeature extends Feature {
         MediaCard(View root, ViewGroup card, ImageView art, ImageView artView, SeekBar bar,
                   SeekDrawable seekDrawable, TextView elapsed, TextView total, TextView title,
                   TextView artist, ImageButton playBtn, ImageView sourceView, String style,
-                  boolean expanded) {
+                  boolean expanded, ViewGroup origActions, List<ImageButton> orderedButtons) {
             this.root = root;
             this.card = card;
             this.art = art;
@@ -1179,6 +1369,48 @@ public final class MediaCardFeature extends Feature {
             this.sourceView = sourceView;
             this.style = style;
             this.expanded = expanded;
+            this.origActions = origActions;
+            this.orderedButtons = orderedButtons;
+        }
+
+        /** 建卡时按钮原本所在的容器：样式重建要把按钮"还"回去，重扫才找得到 */
+        final ViewGroup origActions;
+        /** 建卡时按通知顺序拿到的按钮（reparent 会打乱容器，重建还原靠它） */
+        final List<ImageButton> orderedButtons;
+
+        /**
+         * 拆卡：样式切换（或孤儿清理）后要在同一个 root 上重建。
+         * 把 reparent 走的 title/artist/按钮归还回模板原位（title/artist 置 GONE，
+         * 下一次 build 会重新搬并置回可见），移除我们的卡视图，释放定时器与回调。
+         * 返回 root 是否还被挂在窗口上（false 时调用方不必再重建）。
+         */
+        boolean destroy() {
+            release();
+            try {
+                if (origActions != null) {
+                    for (ImageButton b : orderedButtons) {
+                        reparent(b);
+                        origActions.addView(b);
+                    }
+                }
+                restoreBack(title);
+                restoreBack(artist);
+                ViewParent cp = card.getParent();
+                if (cp instanceof ViewGroup) {
+                    ((ViewGroup) cp).removeView(card);
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "media card destroy failed", t);
+            }
+            return root.isAttachedToWindow();
+        }
+
+        private static void restoreBack(TextView v) {
+            if (v == null) {
+                return;
+            }
+            reparent(v);
+            v.setVisibility(View.GONE);
         }
 
         /** 状态变化只影响 A11 的几何与取色链，其它样式行为保持不变 */
@@ -1335,23 +1567,34 @@ public final class MediaCardFeature extends Feature {
             ((ViewGroup) root).setClipChildren(false);
             ((ViewGroup) root).setClipToPadding(false);
             TextView appName = null;
-            if (headerId != 0) {
-                View header = root.findViewById(headerId);
-                if (header != null) {
-                    if (a11) {
-                        // A11 的卡顶有"app 名 + 时间"那一行（§20-1）：把 app_name_text 摘出来复用，
-                        // 其余头部节点照旧整块藏掉
-                        int anId = id(ctx, "app_name_text");
-                        View v = anId == 0 ? null : header.findViewById(anId);
-                        if (v instanceof TextView) {
-                            appName = (TextView) v;
-                        }
-                        Log.i(TAG, "a11 header appName id=" + anId
-                                + " found=" + (appName != null)
-                                + " text=" + (appName == null ? "-" : appName.getText()));
+            View header = headerId == 0 ? null : root.findViewById(headerId);
+            if (a11) {
+                // A11 的卡顶有"app 名 + 时间"那一行（§20-1）：把 app_name_text 摘出来复用。
+                // OS4 展开态模板整块无 id（headerId=0）：直接全树找 app_name_text。
+                // 此刻必须**先把无 id 的原生头部容器藏掉**——buildA11HeaderRow 会把 app 名
+                // 搬进我们的卡，之后全树唯一的那颗 app_name_text 就在我们的卡里，
+                // 再按它找"原生头部"只会爬到自己（真机 01:08 实测：一爬正好是本卡这个
+                // root 直接子级 → 整卡被 GONE，行里只剩空壳）。
+                int anId = id(ctx, "app_name_text");
+                View v = anId == 0 ? null : root.findViewById(anId);
+                if (v instanceof TextView) {
+                    appName = (TextView) v;
+                    View p = (View) v.getParent();
+                    while (p != null && p != root
+                            && p.getParent() instanceof View && p.getParent() != root) {
+                        p = (View) p.getParent();
                     }
-                    header.setVisibility(View.GONE);
+                    if (p != null && p.getParent() == root) {
+                        p.setVisibility(View.GONE);
+                        Log.i(TAG, "a11 native header hidden cls=" + p.getClass().getName());
+                    }
                 }
+                Log.i(TAG, "a11 header appName id=" + anId
+                        + " found=" + (appName != null)
+                        + " text=" + (appName == null ? "-" : appName.getText()));
+            }
+            if (header != null) {
+                header.setVisibility(View.GONE);
             }
 
             // a11 走 A11 模板的骨架（LOG-1103 §20-3）：根 = FrameLayout，封面 TOP|END 正方形压在右上，
@@ -1411,34 +1654,41 @@ public final class MediaCardFeature extends Feature {
             }
             LinearLayout texts = new LinearLayout(ctx);
             texts.setOrientation(LinearLayout.VERTICAL);
-            reparent(title);
-            CharSequence titleCs = title.getText();
-            title.setText(titleCs == null ? "" : titleCs.toString());
-            title.setTextSize(TypedValue.COMPLEX_UNIT_SP,
+            // 标题/歌手改用**自己的 TextView**（复制文案/字号/颜色），原生那颗原地 GONE。
+            // 以前是 reparent 原视图——OS4 真机有外部写手（模板 wrapper 一族）会对
+            // android:id/title 反复写 INVISIBLE/alpha=0，搬进我们卡也照写不误，
+            // 自建的视图没人动。重绑时 RemoteViews 更新的是留在模板里的原生视图，
+            // 我们这份文字由会话元数据同步（syncTextFromMetadata）。
+            TextView titleView = new TextView(ctx);
+            titleView.setText(str(title.getText()));
+            titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP,
                     a11 ? A11NotifSpec.TITLE_SP : (m3 ? 16 : 17));
             if (a11) {
                 // 设备真值（§20-1）：父样式给 sans-serif-medium 族，布局又叠了 textStyle=BOLD
-                title.setTypeface(a11MediumBoldTitle());
+                titleView.setTypeface(a11MediumBoldTitle());
             } else {
-                title.setTypeface(null, android.graphics.Typeface.BOLD);
+                titleView.setTypeface(null, android.graphics.Typeface.BOLD);
             }
-            title.setTextColor(primary);
-            title.setSingleLine(true);
-            title.setEllipsize(TextUtils.TruncateAt.END);
-            title.setPadding(0, 0, 0, 0);
+            titleView.setTextColor(primary);
+            titleView.setSingleLine(true);
+            titleView.setEllipsize(TextUtils.TruncateAt.END);
+            titleView.setPadding(0, 0, 0, 0);
+            title.setVisibility(View.GONE);
+            title = titleView;
             texts.addView(title, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             if (artist != null) {
-                reparent(artist);
-                CharSequence artistCs = artist.getText();
-                artist.setText(artistCs == null ? "" : artistCs.toString());
+                TextView artistView = new TextView(ctx);
+                artistView.setText(str(artist.getText()));
                 // 副文：设备 vigour_notification_text_size = 12**sp**（AOSP 那一支才是 14dp）
-                artist.setTextSize(TypedValue.COMPLEX_UNIT_SP,
+                artistView.setTextSize(TypedValue.COMPLEX_UNIT_SP,
                         a11 ? A11NotifSpec.ARTIST_SP : 12.5f);
-                artist.setTextColor(secondary);
-                artist.setSingleLine(true);
-                artist.setEllipsize(TextUtils.TruncateAt.END);
-                artist.setPadding(0, 0, 0, 0);
+                artistView.setTextColor(secondary);
+                artistView.setSingleLine(true);
+                artistView.setEllipsize(TextUtils.TruncateAt.END);
+                artistView.setPadding(0, 0, 0, 0);
+                artist.setVisibility(View.GONE);
+                artist = artistView;
                 LinearLayout.LayoutParams al = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                 al.topMargin = a11 ? dp(ctx, A11NotifSpec.ARTIST_MARGIN_TOP_DP) : dp(ctx, 4);
@@ -1594,8 +1844,30 @@ public final class MediaCardFeature extends Feature {
 
             // 现场几何取证：条在部分机器上塌成 0 宽（两侧时间贴在一起），
             // 绑定阶段 getLocationOnScreen 还是 0，所以等布局完成后再量一次
+            final TextView titleW = title;
+            final TextView artistW = artist;
             bar.post(() -> {
                 try {
+                    // OS4 上 title/artist 曾被外部写手置 INVISIBLE/alpha=0（改自建
+                    // TextView 前的老账）；自建视图后这条见证核对 children/颜色/几何。
+                    if (titleW.getVisibility() != View.VISIBLE) {
+                        titleW.setVisibility(View.VISIBLE);
+                        Log.i(TAG, "card title restored at layout");
+                    }
+                    if (artistW != null && artistW.getVisibility() != View.VISIBLE) {
+                        artistW.setVisibility(View.VISIBLE);
+                        Log.i(TAG, "card artist restored at layout");
+                    }
+                    Log.i(TAG, "card texts: children=" + texts.getChildCount()
+                            + " titleVis=" + titleW.getVisibility()
+                            + " titleText=" + str(titleW.getText())
+                            + " titleWH=" + titleW.getWidth() + "x" + titleW.getHeight()
+                            + " textsWH=" + texts.getWidth() + "x" + texts.getHeight()
+                            + " color=" + Integer.toHexString(titleW.getCurrentTextColor())
+                            + " alpha=" + titleW.getAlpha()
+                            + " ty=" + titleW.getTranslationY()
+                            + " xy=" + titleW.getX() + "," + titleW.getY()
+                            + " scroll=" + titleW.getScrollX() + "," + titleW.getScrollY());
                     View row = bar.getParent() instanceof View ? (View) bar.getParent() : null;
                     Log.i(TAG, "card bar geom: bar=" + bar.getWidth() + 'x' + bar.getHeight()
                             + " row=" + (row == null ? "null" : row.getWidth() + 'x' + row.getHeight())
@@ -1804,7 +2076,7 @@ public final class MediaCardFeature extends Feature {
             clearAncestorBackgrounds(root);
 
             MediaCard mc = new MediaCard(root, card, art, artView, bar, seekDrawable, elapsed,
-                    total, title, artist, play, sourceView, style, expanded);
+                    total, title, artist, play, sourceView, style, expanded, actions, ordered);
             if ("a11".equals(style)) {
                 mc.a11Column = column;
                 mc.a11HeaderName = appName;
@@ -2056,6 +2328,35 @@ public final class MediaCardFeature extends Feature {
                     v.setVisibility(View.GONE);
                 }
             }
+            hideOldExpanded(ctx, root);
+        }
+
+        /**
+         * OS4 展开态（framework MediaStyle 族）的原生件没有上面那些 id：
+         * 原生进度行（SeekBar + 两枚时间）——不是我们的条就整行 GONE，否则它画在
+         * 我们的卡上面（z 序：我们的卡在 root index 0，原生内容在后加入的在上面）。
+         * 头部行不在这里处理：a11 建 build 时 app 名会被搬进我们的卡，那之后再按
+         * app_name_text 找"原生头部"只会爬到自己（真机 01:08 实测整卡被藏），
+         * 所以原生头部的隐藏在 build 摘 app 名之前做。
+         */
+        private static void hideOldExpanded(Context ctx, View root) {
+            int mine = ID_A11_SEEK;
+            java.util.Deque<View> stack = new java.util.ArrayDeque<>();
+            stack.push(root);
+            while (!stack.isEmpty()) {
+                View v = stack.pop();
+                if (v instanceof SeekBar && v.getId() != mine
+                        && v.getParent() instanceof ViewGroup) {
+                    ((ViewGroup) v.getParent()).setVisibility(View.GONE);
+                    continue;
+                }
+                if (v instanceof ViewGroup) {
+                    ViewGroup g = (ViewGroup) v;
+                    for (int i = 0; i < g.getChildCount(); i++) {
+                        stack.push(g.getChildAt(i));
+                    }
+                }
+            }
         }
 
         private static void reparent(View v) {
@@ -2285,49 +2586,81 @@ public final class MediaCardFeature extends Feature {
             return Color.HSVToColor(new float[]{h, s, v});
         }
 
+        /**
+         * os5 背景的磨砂底图。以前是 20×20 + 3×3 均值——拉伸到整卡只剩一片糊泥，
+         * 用户报"os5 背景模糊不正常，好像糊了"。改成 96px 长边 + 三轮 box blur
+         * （可分离滑动窗，O(n) 每轮）：低频色块结构保留，拉伸后是"磨砂取色底"
+         * 而不是"放大马赛克"。走 ArtBgDrawable 原有的拉伸+渐变纱，其余链路不动。
+         */
         static Bitmap softBitmap(Bitmap src) {
             if (src == null || src.isRecycled() || src.getWidth() < 2 || src.getHeight() < 2) {
                 return null;
             }
             Bitmap small = null;
             try {
-                int size = 20;
-                small = Bitmap.createScaledBitmap(src, size, size, true);
-                int[] px = new int[size * size];
-                small.getPixels(px, 0, size, 0, 0, size, size);
-                int[] out = new int[px.length];
-                for (int y = 0; y < size; y++) {
-                    for (int x = 0; x < size; x++) {
-                        int a = 0, r = 0, g = 0, b = 0, n = 0;
-                        for (int dy = -1; dy <= 1; dy++) {
-                            for (int dx = -1; dx <= 1; dx++) {
-                                int yy = y + dy, xx = x + dx;
-                                if (yy < 0 || yy >= size || xx < 0 || xx >= size) {
-                                    continue;
-                                }
-                                int c = px[yy * size + xx];
-                                a += Color.alpha(c);
-                                r += Color.red(c);
-                                g += Color.green(c);
-                                b += Color.blue(c);
-                                n++;
-                            }
-                        }
-                        out[y * size + x] = Color.argb(a / n, r / n, g / n, b / n);
-                    }
+                float scale = Math.min(1f, 96f / Math.max(src.getWidth(), src.getHeight()));
+                int w = Math.max(2, Math.round(src.getWidth() * scale));
+                int h = Math.max(2, Math.round(src.getHeight() * scale));
+                // 必须**自建可变位图**：createScaledBitmap 同尺寸时返回 src 本身，
+                // 而 src（通知 largeIcon/Icon 解出来的那颗）是不可变的——
+                // setPixels 直接 IllegalStateException（真机 01:38 栈）。
+                small = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+                Canvas draw = new Canvas(small);
+                draw.drawBitmap(src, null,
+                        new RectF(0, 0, w, h), new Paint(Paint.FILTER_BITMAP_FLAG));
+                int[] px = new int[w * h];
+                small.getPixels(px, 0, w, 0, 0, w, h);
+                int r = Math.max(2, Math.min(w, h) / 12);
+                for (int pass = 0; pass < 3; pass++) {
+                    boxBlur(px, w, h, r, true);
+                    boxBlur(px, w, h, r, false);
                 }
-                return Bitmap.createBitmap(out, size, size, Bitmap.Config.ARGB_8888);
+                small.setPixels(px, 0, w, 0, 0, w, h);
+                Log.i(TAG, "os5 bg blur src=" + src.getWidth() + "x" + src.getHeight()
+                        + " out=" + w + "x" + h + " r=" + r);
+                return small;
             } catch (Throwable t) {
                 Log.w(TAG, "softBitmap failed", t);
-                return null;
-            } finally {
-                if (small != null && small != src) {
+                if (small != null) {
                     try {
                         small.recycle();
                     } catch (Throwable ignored) {
                     }
                 }
+                return null;
             }
+        }
+
+        /** 可分离 box blur（滑动窗求和，边缘 clamp）。horizontal=false 时跑纵向。 */
+        private static void boxBlur(int[] px, int w, int h, int r, boolean horizontal) {
+            int n = horizontal ? w : h;
+            int m = horizontal ? h : w;
+            int win = r * 2 + 1;
+            int[] out = new int[px.length];
+            for (int j = 0; j < m; j++) {
+                long sa = 0, sr = 0, sg = 0, sb = 0;
+                for (int k = -r; k <= r; k++) {
+                    int i = Math.min(n - 1, Math.max(0, k));
+                    int c = px[horizontal ? j * w + i : i * w + j];
+                    sa += Color.alpha(c);
+                    sr += Color.red(c);
+                    sg += Color.green(c);
+                    sb += Color.blue(c);
+                }
+                for (int i = 0; i < n; i++) {
+                    out[horizontal ? j * w + i : i * w + j] = Color.argb(
+                            (int) (sa / win), (int) (sr / win), (int) (sg / win), (int) (sb / win));
+                    int add = Math.min(n - 1, i + r + 1);
+                    int sub = Math.max(0, i - r);
+                    int ca = px[horizontal ? j * w + add : add * w + j];
+                    int cs = px[horizontal ? j * w + sub : sub * w + j];
+                    sa += Color.alpha(ca) - Color.alpha(cs);
+                    sr += Color.red(ca) - Color.red(cs);
+                    sg += Color.green(ca) - Color.green(cs);
+                    sb += Color.blue(ca) - Color.blue(cs);
+                }
+            }
+            System.arraycopy(out, 0, px, 0, px.length);
         }
 
         static final class ArtBgDrawable extends Drawable {
@@ -2826,6 +3159,10 @@ public final class MediaCardFeature extends Feature {
             try {
                 MediaMetadata md = controller != null ? controller.getMetadata() : null;
                 String key = trackKey(md);
+                // 卡上的 title/artist 是从模板摘走的**原视图**：OS4 上通知重绑不走
+                // setChild（RemoteViews 重投对已摘走的视图无效），文字必须自己跟会话
+                // 元数据走，否则换歌后卡上停在上一首（真机 01:25-01:26 实测）。
+                syncTextFromMetadata(md);
                 if (!key.isEmpty() && key.equals(lastTrackKey)) {
                     return;
                 }
@@ -2835,11 +3172,66 @@ public final class MediaCardFeature extends Feature {
                     // 记了就等于"后来封面到了也不再取色"，用户看到的正是停在上一首的底色
                     return;
                 }
-                Log.i(TAG, "track changed, retinting: " + key);
+                Log.i(TAG, "track changed, retinting: " + key
+                        + " src=" + (src == null ? "null" : src.getWidth() + "x" + src.getHeight())
+                        + " artFrom=" + artFrom
+                        + " artView=" + (art == null ? "null" : art.getClass().getSimpleName()
+                                + ":" + (art.getDrawable() == null ? "empty" : "ok")));
                 applyPalette(animate, src);
                 lastTrackKey = key;
             } catch (Throwable t) {
                 Log.w(TAG, "refreshColors failed", t);
+            }
+        }
+
+        /**
+         * title/artist 的可见性/alpha 自愈：OS4 真机有外部写手把摘进我们卡的 title
+         * 设成 INVISIBLE（1s bar.post 见证抓到 titleVis=4、尺寸正常 432x46），
+         * 后来又抓到 alpha=0.0（color=ffffffff、vis=0、xy 全对，就是不画）——
+         * 都不是我们任何路径写的（我们只对 art 视图做 alpha 淡入）。
+         * ticker 每拍幂等修复（写前判等，不做重绘机）。
+         */
+        void repairTextVisibility() {
+            if (title != null) {
+                if (title.getVisibility() != View.VISIBLE) {
+                    title.setVisibility(View.VISIBLE);
+                    Log.i(TAG, "card title restored vis");
+                }
+                if (title.getAlpha() != 1f) {
+                    title.setAlpha(1f);
+                    Log.i(TAG, "card title restored alpha");
+                }
+            }
+            if (artist != null) {
+                if (artist.getVisibility() != View.VISIBLE) {
+                    artist.setVisibility(View.VISIBLE);
+                    Log.i(TAG, "card artist restored vis");
+                }
+                if (artist.getAlpha() != 1f) {
+                    artist.setAlpha(1f);
+                    Log.i(TAG, "card artist restored alpha");
+                }
+            }
+        }
+
+        /** 标题/歌手跟随会话元数据；空串不写（避免把卡面抹白），同值不写（避免无谓重排） */
+        private void syncTextFromMetadata(MediaMetadata md) {
+            if (md == null || title == null) {
+                return;
+            }
+            try {
+                CharSequence t = md.getDescription().getTitle();
+                if (t != null && t.length() > 0 && !t.toString().equals(str(title.getText()))) {
+                    title.setText(t.toString());
+                }
+                if (artist != null) {
+                    CharSequence a = md.getDescription().getSubtitle();
+                    if (a != null && a.length() > 0 && !a.toString().equals(str(artist.getText()))) {
+                        artist.setText(a.toString());
+                    }
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "sync text failed", t);
             }
         }
 
@@ -3015,6 +3407,26 @@ public final class MediaCardFeature extends Feature {
             }
         }
 
+        /** 会话服务比 SystemUI 晚起来（重启后建卡那一拍 getActiveSessions 为空），
+         *  卡片会从此永远黑底/白钮（真机 00:56 复现）。拿到控制器前每 2.5s 重试一次，
+         *  最多 8 次；root 离开窗口即停。 */
+        int sessionRetries;
+
+        void scheduleSessionRetry() {
+            if (sessionRetries >= 8) {
+                return;
+            }
+            sessionRetries++;
+            handler.postDelayed(() -> {
+                try {
+                    if (controller == null && root.isAttachedToWindow()) {
+                        bindSession();
+                    }
+                } catch (Throwable ignored) {
+                }
+            }, 2500);
+        }
+
         void bindSession() {
             if (controller != null) {
                 return;
@@ -3056,13 +3468,19 @@ public final class MediaCardFeature extends Feature {
                 }
                 if (chosen == null) {
                     Log.i(TAG, "no media session found");
+                    scheduleSessionRetry();
                     return;
                 }
+                sessionRetries = 0;
                 Log.i(TAG, "session=" + chosen.getPackageName() + " state="
                         + (chosen.getPlaybackState() == null ? -1 : chosen.getPlaybackState().getState()));
                 controller = chosen;
                 updateSourceIcon();
                 syncArt();
+                // 启动竞态自愈：建卡那一拍会话服务还没起（palette 黑底兜底、duration=0），
+                // 现在控制器才绑上，而元数据没变就不会再有回调 —— 作废 trackKey 强制重取色
+                lastTrackKey = "";
+                refreshColors(false);
                 chosen.registerCallback(callback, handler);
                 updateSeekable();
                 updateProgress();
@@ -3232,6 +3650,7 @@ public final class MediaCardFeature extends Feature {
                     }
                 }
                 elapsed.setText(fmt(position));
+                repairTextVisibility();
                 total.setText(fmt(duration));
             } catch (Throwable t) {
                 Log.w(TAG, "updateProgress failed", t);

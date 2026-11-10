@@ -155,7 +155,7 @@ public final class PickerAlbumsFeature extends Feature {
                 return "unknown(no-app)";
             }
             android.content.Intent pick = new android.content.Intent(
-                    "android.intent.action.PICK_IMAGES");
+                    "android.provider.action.PICK_IMAGES");
             boolean ok = ((android.content.Context) app).getPackageManager()
                     .resolveActivity(pick, 0) != null;
             return ok ? "reachable" : "no-entry";
