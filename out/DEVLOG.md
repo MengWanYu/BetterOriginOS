@@ -4242,3 +4242,27 @@ light polish 是版本无关路径，OS4（A14 framework 模板）**开键即命
 - 验收器跑法：`python work/verify_row_os4.py <dump.xml> <logcat窗口> 2.0`
   （dump=面板展开后的 uiautomator dump，log=开启 notify_row 之后的模块日志窗口；
   **日志窗口必须覆盖开启之后的时段**，旧窗口会假红 L1）。
+
+## 2026-11-11（晨）用户报两个观感：a11 切歌黑左底、os5 切歌右侧小封面闪现——均已修
+
+### 1. a11 切歌"左边黑"（奢香夫人/读心术复现）
+根因不是取色算错（日志里每首歌的 bg 都对：奢香夫人=f0f0e8、读心术=f8f8f8），
+而是**一部分卡的 art 引用是 null**：建卡那一拍 RemoteViews 还没把 largeIcon 投进模板，
+discoverMedia 的 right_icon/largestArtView 都拿不到 drawable ⇒ art=null。此后
+bbkmusic 的元数据里没有封面位图 ⇒ artSource() 永远 null ⇒ refreshColors 在
+`src==null && curBg!=null` 早退 ⇒ 这张卡**永久停在建卡时的黑底**，换歌也不取色。
+修：`rediscoverArtIfNeeded()`——refreshColors 开头重探一次（right_icon → 最大方形
+ImageView，探到即接管：GONE + 挂防闪守卫 + 作废封面指纹）。真机：`art rediscovered`
+→ `src=160x160` → 每首歌非黑取色（心里挂念=f85860 红、善变=088090 青、搀扶=000040 藏青）。
+配套把会话重试首轮 2.5s→1.2s（解锁后的黑窗从 ~3.5s 缩到 ~1.5s）。
+
+### 2. os5 切歌"右侧小封面闪现"
+原生 right_icon 被通知重投重新 show 出来（`a11 art native reshown` 日志）——防闪守卫
+`guardArtHidden` **以前只挂在 a11 分支**，os5/material 没人再藏。修：守卫放开全样式
+（build + syncArt 两处都去掉 a11 门槛）。换歌时 `reshown rehidden` 在 os5 卡上同样触发，
+重投→同帧 layout 内藏回，无可见闪现。
+
+### 验收
+offline-all 24 项绿；a11 卡结构 dump（texts=[80,412] a11 位、header 行、无源图标动作排）；
+每轨取色 bg 非黑；os5 卡换歌守卫日志。另：面板空闲时 screencap 会拿到**旧帧**
+（视图树已更新、无重绘触发）——验证一律以 dump+日志为准，截图可能滞后一首歌。

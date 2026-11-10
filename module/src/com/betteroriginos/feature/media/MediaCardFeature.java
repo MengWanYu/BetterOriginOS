@@ -1189,7 +1189,8 @@ public final class MediaCardFeature extends Feature {
         final View root;
         /** a11 时是 FrameLayout（A11 的根），其它样式是竖向 LinearLayout（LOG-1103 §20-3） */
         final ViewGroup card;
-        final ImageView art;
+        /** 原生封面视图；OS4 上建卡那一拍可能还没内容，rediscoverArtIfNeeded 会重指 */
+        ImageView art;
         final ImageView artView;
         final SeekBar bar;
         final SeekDrawable seekDrawable;
@@ -1647,10 +1648,10 @@ public final class MediaCardFeature extends Feature {
                     artView.setImageDrawable(art.getDrawable());
                 }
                 art.setVisibility(View.GONE);
-                if (a11) {
-                    // 换歌那一拍 RemoteViews 会把它设回可见 ⇒ 右边闪一下小封面，挂自愈守卫
-                    guardArtHidden(art);
-                }
+                // 换歌那一拍 RemoteViews 会把原生封面设回可见 ⇒ 小封面闪现/常驻
+                //（用户报 os5"右边小封面闪现"；a11 有守卫、os5/material 以前没有）。
+                // 守卫与样式无关，全部挂上。
+                guardArtHidden(art);
             }
             LinearLayout texts = new LinearLayout(ctx);
             texts.setOrientation(LinearLayout.VERTICAL);
@@ -3083,8 +3084,8 @@ public final class MediaCardFeature extends Feature {
                 lastAppliedArt = d;
                 lastDrawableHash = h;
                 a11ReliefBg = reliefBg;
-                if (art != null && "a11".equals(style)) {
-                    // 挂在这里而不是只挂在建卡那一次：换歌的重新应用发生在绑定之后
+                if (art != null) {
+                    // 挂在这里而不是只挂在建卡那一次：换歌的重新应用发生在绑定之后（全样式）
                     guardArtHidden(art);
                 }
             } catch (Throwable t) {
@@ -3163,6 +3164,10 @@ public final class MediaCardFeature extends Feature {
                 // setChild（RemoteViews 重投对已摘走的视图无效），文字必须自己跟会话
                 // 元数据走，否则换歌后卡上停在上一首（真机 01:25-01:26 实测）。
                 syncTextFromMetadata(md);
+                // 建卡那一拍封面视图可能还没内容（RemoteViews 未投完）→ art=null，
+                // bbkmusic 元数据又没有封面位图 ⇒ artSource 永远 null ⇒ a11 卡
+                // 永久黑底、永不取色（用户报"奢香夫人/读心术左边黑"）。重探一次。
+                rediscoverArtIfNeeded();
                 if (!key.isEmpty() && key.equals(lastTrackKey)) {
                     return;
                 }
@@ -3211,6 +3216,47 @@ public final class MediaCardFeature extends Feature {
                     artist.setAlpha(1f);
                     Log.i(TAG, "card artist restored alpha");
                 }
+            }
+        }
+
+        /**
+         * art 引用为空（或没内容）时重探一次：建卡那一拍 RemoteViews 往往还没把
+         * largeIcon 投进模板，discoverMedia 的 right_icon/largestArtView 都拿不到
+         * drawable ⇒ art=null。此后 bbkmusic 的元数据里没有封面位图，artSource()
+         * 永远 null —— a11 卡黑底不取色（用户报"切到奢香夫人/读心术左边黑"）。
+         * 探到就接管：隐藏原生视图 + 挂防闪守卫，之后 watchArtArrival/retint 正常走。
+         */
+        void rediscoverArtIfNeeded() {
+            if (art != null && art.getDrawable() != null) {
+                return;
+            }
+            try {
+                View found = null;
+                int artId = id(root.getContext(), "right_icon");
+                if (artId != 0) {
+                    View v = root.findViewById(artId);
+                    if (v instanceof ImageView && ((ImageView) v).getDrawable() != null) {
+                        found = v;
+                    }
+                }
+                if (found == null) {
+                    View v = largestArtView(root);
+                    if (v instanceof ImageView && ((ImageView) v).getDrawable() != null) {
+                        found = v;
+                    }
+                }
+                if (found instanceof ImageView) {
+                    ImageView prev = art;
+                    art = (ImageView) found;
+                    art.setVisibility(View.GONE);
+                    guardArtHidden(art);
+                    lastArtDrawableSeen = null;
+                    lastArtHashSeen = 0;
+                    Log.i(TAG, "art rediscovered cls=" + art.getClass().getName()
+                            + " prev=" + (prev == null ? "null" : prev.getClass().getSimpleName()));
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "rediscover art failed", t);
             }
         }
 
@@ -3424,7 +3470,7 @@ public final class MediaCardFeature extends Feature {
                     }
                 } catch (Throwable ignored) {
                 }
-            }, 2500);
+            }, sessionRetries == 1 ? 1200 : 2500);
         }
 
         void bindSession() {
