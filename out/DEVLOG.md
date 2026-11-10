@@ -4154,3 +4154,72 @@ LSPosed 换成了 **Vector 2.2**（CLI `/data/adb/lspd/cli`，没有 `lspctl`）
 - 详细逆向（页面结构、两层隐藏条件、类/方法、资源 id、素材路径）见罗盘日志 §12。
 - 未提交（`DesktopMotionFeature`、`SuCommander.writeSystem`、`Feature#onOptionChanged`、
   FeatureManager/FeatureAdapter/strings/arrays、XposedHelpers 桩、罗盘日志 §11–12、work/os4-re）。
+
+## 2026-11-11（凌晨，无人值守）OS4 适配第二批：媒体卡三样式 + 快门录像态 + 选择器探测
+
+设备 PD2357（V2357A，Funtouch 14.1 / Vector 2.2）。上一批（c8ad62c）只落地了桌面动效；
+本批把相机快门、媒体卡、选择器全部过完并提交（55863f3）。
+
+### 快门（OS4 直接命中，修一处）
+- 四类（ShutterButton/DualPointButton/RotateImageView/TwoStateImageView）+ `shutter_button`/
+  `ic_capture_camera` 资源在 OS4 相机 13.5.3.0 里全在；hook 面变为
+  `ImageView.setImage*=2 / RotateImageView.onDraw=1 / ImageView.onDraw=1`（OS4 相机不再
+  自己声明 setImage*/onDraw，靠基类钩子兜住）。画环 ✓ 拍照 ✓（IMG_20261110_234754）。
+- **坑**：OS4 切模式不走 setImage*（icon hooks 全链 0 命中）→ LAST_NAME 恒空 → 录像态也被
+  接管（白环盖住原生红盘）。修：快门 content-desc 兜底（录像态="开始录制…"，拍照态=
+  "拍照…"），见 desc 即让位。修后录像态原生红盘 ✓。
+
+### 选择器（hook 直接命中，修一处）
+- `queryAlbums`/`appendWhere` hooks=2 直接生效：相册 tab 从 3 个白名单 → 全量 43 个
+  （真机截图 + `refresh: albums=[...]` 见证）。
+- **坑**：`pickerState` 用错 action（`android.intent.action.PICK_IMAGES`，真值
+  `android.provider.action.PICK_IMAGES`）→ "landing no-entry" 是假阴性，已修。
+
+### 媒体卡（OS4 上四处新坑，全部真机取证）
+1. **安装循环**：Vector 重复派发 handleLoadPackage（8 秒内 systemui×2+magazine×2），
+   且会整体重建模块 classloader（广播后静态归零）→ hook 全量叠加。修：FeatureManager
+   双重防重入（静态集合 + 宿主进程 SharedPreferences，键=`installed_<进程启动时刻>`）。
+   注意 `notify row feature installed header-time=` 是 NotifyRowFeature 的**低频补发见证**
+   （headerTimeMode），不是重装——别再当循环排查（凌晨我在这上面空转了一轮）。
+2. **OS4 媒体模板两副面孔**：收起态=framework `notification_template_material_media`
+   （`media_actions`/`right_icon`，根 MediaNotificationView，识别照旧）；展开态是 vivo 的
+   MediaStyle 族（`action0..4`、无 id 的头部/封面/进度行，SeekBar 是 vivo 加的）——
+   旧探测对它全盲。修：discoverMedia 统一探测（actions=media_actions → action0 父容器；
+   art=right_icon → 子树最大方形 ImageView），hideOldExpanded 藏原生进度行。
+3. **整卡被藏**：hideOldExpanded 顺着 app_name_text 爬到 root 直接子级——a11 建卡时 app 名
+   已搬进我们的卡，一爬正好爬到本卡 → 整卡 GONE（行里只剩 148px 空壳、取色日志却活着）。
+   修：原生无 id 头部必须在 build 摘 app 名**之前**藏（此刻爬升才指向原生容器）。
+4. **title 看不见**：外部写手（模板 wrapper 一族）对搬进我们卡的 `android:id/title`
+   反复写 INVISIBLE/alpha=0（见证 titleVis=4、color=ffffffff/alpha=0.0/xy 全对——
+   修可见性没用，alpha 修完又被写回）。修：**不再搬原视图**——自建 TextView 复制
+   文案/字号/颜色，原生 title 留在模板里原地 GONE（RemoteViews 重投照常更新它，
+   我们的文字由会话元数据同步）。isNight 同时改用 SystemUI 上下文（bbkmusic context
+   浅色 → os5/material 出"暖黑底+深棕字"）。
+5. **os5 背景"糊了"**：softBitmap=20×20+3×3 均值拉伸=糊泥；改 96px+三轮 box blur 后
+   第一版又踩 `createScaledBitmap` 同尺寸返回**不可变原图** → setPixels IllegalStateException
+   （真机栈）。终版：自建可变位图 + Canvas 绘制再模糊。像素级验收：取色 bg=ff088090
+   vs 截图 (8,127,143)，1/255 内一致。
+
+### 面板关闭会剥行（OS4 行为，别当 bug）
+静默区（importance=2）的通知行在面板关闭时被 vivo 剥成空壳（`MediaContainerView→
+RoundRelativeLayout` 无子级），重开面板时 setChild 重新绑 → 卡片随面板自然重建。
+勿扰开着时 bbkmusic 通知 importance=2 进静默区——`cmd notification set_dnd off` 关勿扰
+不能恢复 importance（channel 决定），但行仍会 attach，卡片照常接管。
+
+### 样式即时切换
+样式选项 ContentObserver → forceRestyleAll → destroy（把 title/按钮归还模板）→ 重扫重建。
+真机 `force restyle all style option changed rebuilt=2 dropped=0`，os5/material/a11 三样式
+来回切换全部即时生效。
+
+### 验收（代码层）
+- offline-all 22 项绿。
+- `verify_os5_mirror.py --media-only` 对 OS4 真机日志（os4-live-full.log）：76 通过/0 失败。
+- 快门：画环日志 `drawn outer=140 desc=拍照` + 拍照产物；录像态让位截图 + 无 paint 日志。
+- 选择器：相册 tab 截图 + albums 全量日志。
+- 三样式：os5 磨砂底（45/49 unique 像素）+ material（accent 橙红）+ a11（bg=088090 青取色）。
+
+### 未竟
+- 通知栏大图标（notify_row）移植到 OS4 未开始（本批 notify_row 保持 0=关）。
+- a11 收起态（compact）在 OS4 上的几何未单独验证（展开态已验）。
+- a11 的 QS 磁贴路径（OsProfile.isQsTilePlayer）在 OS4 不适用（媒体在通知列表，SDK34 判定
+  正确），`ControlCenterMediaPlayerView` 在 OS4 插件里存在但未被使用。
