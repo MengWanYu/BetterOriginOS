@@ -62,10 +62,13 @@ RE_A11_SPEC = re.compile(
     r" trackDp=(\d+) colTop=(\d+) colSide=(\d+) colMinH=(\d+) headH=(\d+)"
     r" actMargin=(\d+)/(\d+) density=([\d.]+) fontScale=([\d.]+) radius=(-?\d+)"
     r" hostCorner=(-?\d+)")
+# compact/btnPos/mainEndPx/btnMarginPx 是 11-05 收起态（media_q 模板）那三项回读：
+# compact=1 时动作带必须在文字**右侧**、给封面的右内缩必须等于 artSide+16dp、且永远没有进度条。
 RE_A11_ART = re.compile(
     r"a11 art state=(\w+) size=(\d+) contentH=(-?\d+) scaleType=(\w+) clip=(\w+)"
     r" titlePx=(\d+) subtextPx=(\d+) timePx=(\d+) titleMedium=(\d) seekVis=(-?\d+)"
-    r" padTbPx=(\d+) seekDur=(\d+) seekSession=(\d)")
+    r" padTbPx=(\d+) seekDur=(\d+) seekSession=(\d)"
+    r" compact=(\d) btnPos=(\w+) mainEndPx=(-?\d+) btnMarginPx=([\d/-]+|-)")
 RE_A11_RELIEF = re.compile(
     r"a11 art relief side=(\d+)x(\d+) src=(\d+)x(\d+) hash=([0-9a-fA-F]+)"
     r" color=([0-9a-fA-F]{1,8}) from=(\w+) rtl=(\d)")
@@ -526,6 +529,7 @@ def check(text, density, notify=True, media=True, expect_inert=False):
     prelayout = set()
     measurable = set()
     seek_covered = set()      # 真的出现过"展开且有时长"那一格（进度条显隐判据的正侧样本）
+    compact_measured = set()  # 收起态那份 media_q 结构真的被建出来并且量到了高度
     for mo in m["art"]:
         state = mo.group(1).lower()
         size, content_h = int(mo.group(2)), int(mo.group(3))
@@ -565,15 +569,40 @@ def check(text, density, notify=True, media=True, expect_inert=False):
         seek_vis = mo.group(10)
         dur = int(mo.group(12))
         session = int(mo.group(13))
+        compact = int(mo.group(14))
+        btn_pos = mo.group(15).lower()
+        main_end = int(mo.group(16))
+        btn_margin = mo.group(17)
         # A11 的显隐判据是三条与：**有会话 && 有时长 && 展开**（NotificationMediaTemplateViewWrapper
         # .resolveViews + compact_media_notification_seekbar_enabled=false，§15-7）。
         # 会话被拆掉那一刻 lastDurationMs 还留着旧值，此时藏条是对的，不能算回归。
-        want_vis = "0" if (state == "expanded" and dur > 0 and session == 1) else "8"
+        # compact=1 是收起态那份 media_q 结构：它的根不是 MediaNotificationView，
+        # 模板里那颗进度条 ViewStub 从来没人 inflate ⇒ 即使行被展开也必须没有条。
+        want_vis = "0" if (state == "expanded" and dur > 0 and session == 1
+                           and compact != 1) else "8"
         if seek_vis != want_vis:
-            bad.append("%s 态(dur=%dms session=%d)进度条容器 seekVis=%s，A11 该态应为 %s"
-                       % (state, dur, session, seek_vis, want_vis))
-        if state == "expanded" and dur > 0 and session == 1:
+            bad.append("%s 态(compact=%d dur=%dms session=%d)进度条容器 seekVis=%s，A11 该态应为 %s"
+                       % (state, compact, dur, session, seek_vis, want_vis))
+        if state == "expanded" and dur > 0 and session == 1 and compact != 1:
             seek_covered.add("expanded")
+        # 收起态排布（media_q：main_column 横向、动作带在文字右侧、无左右外边距）
+        if compact == 1:
+            if btn_pos != "beside":
+                bad.append("compact=1 但 btnPos=%s：收起态动作带必须在文字**右侧**"
+                           "（media_q 的 main_column 是横向的），在下方是展开那份 big_media_q" % btn_pos)
+            if btn_margin != "0/0":
+                bad.append("compact=1 但 btnMarginPx=%s：收起模板的 media_actions 没写任何左右外边距"
+                           "（14dp/20dp 只属于展开那份）" % btn_margin)
+            exp_end = size + 16 * dens
+            if abs(main_end - exp_end) > 1.5:
+                bad.append("给封面的右内缩期望 %.1fpx（=实测封面 %dpx + notification_content_margin_end"
+                           " 16dp）实得 %dpx —— 不随封面重算就会把文字压在封面下"
+                           % (exp_end, size, main_end))
+        else:
+            if btn_pos != "below":
+                bad.append("compact=0 却 btnPos=%s：展开那份的动作带是文字列的兄弟、在其下方" % btn_pos)
+            if main_end != -1:
+                bad.append("compact=0 却有 mainEndPx=%d：展开态没有横向 main_column 这一层" % main_end)
         # 进度条那一版：用户 11-04 早上指定"要播放器（media_view.xml）那个样式"，
         # 它的可观测区别就是触控带 16dp（通知卡那一版是 24dp，§15-6）
         pad_tb = int(mo.group(11))
@@ -594,10 +623,13 @@ def check(text, density, notify=True, media=True, expect_inert=False):
             fails.append("art(%s): " % state + "; ".join(bad))
         else:
             measurable.add(state)
+            if compact == 1:
+                compact_measured.add(size)
             ok("art", "%s size=%d=contentH scale=%s clip=%s title=%dpx subtext=%dpx"
                " time=%dpx medium=%d seekVis=%s padTB=%dpx dur=%dms"
+               " compact=%d btnPos=%s mainEndPx=%d btnMargin=%s"
                % (state, size, mo.group(4), mo.group(5), title_px, sub_px, time_px,
-                  medium, seek_vis, pad_tb, dur))
+                  medium, seek_vis, pad_tb, dur, compact, btn_pos, main_end, btn_margin))
 
     # density 未知时上一条已经说明了真实成因（建卡那一拍的日志没抓到），别再报成
     # "该态没在真机上验过"——那是"没展开卡片"的说法，会把人往错的方向查。
@@ -611,6 +643,11 @@ def check(text, density, notify=True, media=True, expect_inert=False):
         if "expanded" in measurable and "expanded" not in seek_covered:
             fails.append("art: 展开帧没有一条同时满足\"有会话 + 有时长\"，"
                          "进度条显隐只在\"该藏\"那一侧取样 —— 本轮没验过\"该露\"")
+        # 收起态结构是 11-05 新增的那条产品行为，它没有可测量样本时不能靠"collapsed 这个词出现过"过关
+        if not compact_measured:
+            fails.append("art: 本轮没有一条 compact=1 的**可测量**见证 —— 收起态（media_q 横向"
+                         " main_column、动作带在文字右侧）在真机上没跑过（面板全程展开，"
+                         "或补扫把收起子视图建成了展开结构）")
 
     if media and not m["a11pal"]:
         fails.append("a11: 没有 A11 取色日志（媒体卡未绑定或 style 不是 a11）")
@@ -838,8 +875,8 @@ GOOD = """
 11-02 23:10:02 1234 1234 I BetterOriginOS: notify_row: os5_mirror: clear-all attached size=138 marginBottom=120 nav=false navSrc=insets navVis=0 navH=0 shade=isExpanded qs=isQsFullScreen host=NotificationPanelView
 11-02 23:10:02 1234 1234 I BetterOriginOS: notify_row: os5_mirror: clear-all tap inlineListener=1 inlineVis=4 shelfVis=0
 11-02 23:10:03 1234 1234 I BetterOriginOS: media_card: a11 card spec artSide=contentHeight btnPad=24 btnEnd=6 btn=108x120 src=48 titlePx=42 artistPx=36 timePx=42 trackDp=3 colTop=126 colSide=60 colMinH=183 headH=132 actMargin=42/60 density=3.0 fontScale=1.0 radius=0 hostCorner=72
-11-02 23:10:03 1234 1234 I BetterOriginOS: media_card: a11 art state=expanded size=255 contentH=255 scaleType=CENTER_CROP clip=false titlePx=42 subtextPx=36 timePx=42 titleMedium=1 seekVis=0 padTbPx=48 seekDur=3536000 seekSession=1
-11-02 23:10:03 1234 1234 I BetterOriginOS: media_card: a11 art state=collapsed size=126 contentH=126 scaleType=CENTER_CROP clip=false titlePx=42 subtextPx=36 timePx=42 titleMedium=1 seekVis=8 padTbPx=48 seekDur=3536000 seekSession=1
+11-02 23:10:03 1234 1234 I BetterOriginOS: media_card: a11 art state=expanded size=255 contentH=255 scaleType=CENTER_CROP clip=false titlePx=42 subtextPx=36 timePx=42 titleMedium=1 seekVis=0 padTbPx=48 seekDur=3536000 seekSession=1 compact=0 btnPos=below mainEndPx=-1 btnMarginPx=42/60
+11-02 23:10:03 1234 1234 I BetterOriginOS: media_card: a11 art state=collapsed size=126 contentH=126 scaleType=CENTER_CROP clip=false titlePx=42 subtextPx=36 timePx=42 titleMedium=1 seekVis=8 padTbPx=48 seekDur=3536000 seekSession=1 compact=1 btnPos=beside mainEndPx=174 btnMarginPx=0/0
 11-02 23:10:03 1234 1234 I BetterOriginOS: media_card: a11 palette state=expanded bg=ff33404d fg=ffe9f3f7 primary=ffffffff secondary=b3ffffff colorized=1 session=1 contrast=10.60 artwork=true art=200x200 srcFrom=largeIcon srcHash=aaa111 metaTitle=示例歌 (Live) 版 gridBg=11250 gridFg=13500 track=示例歌 (Live)
 11-02 23:10:03 1234 1234 I BetterOriginOS: media_card: a11 palette state=collapsed bg=ffffffff fg=ff000000 primary=ff000000 secondary=ff4d4d4d colorized=0 session=0 contrast=21.00 artwork=false art=0x0 srcFrom=none srcHash=0 metaTitle=- gridBg=0 gridFg=0 track=-
 11-02 23:10:03 1234 1234 I BetterOriginOS: media_card: a11 art relief side=200x200 src=200x200 hash=aaa111 color=ff33404d from=largeIcon rtl=0
@@ -913,6 +950,18 @@ BAD_CASES = {
     "A11 封面不再等于内容块高": GOOD.replace(
         "a11 art state=expanded size=255 contentH=255",
         "a11 art state=expanded size=180 contentH=255"),
+    # 收起态（media_q）三条：动作带位置、右内缩是否跟着封面重算、以及"收起绝不出现进度条"
+    "A11 收起态动作带排到文字下方": GOOD.replace(
+        "compact=1 btnPos=beside", "compact=1 btnPos=below"),
+    "A11 收起态右内缩按常量钉死（没跟封面重算）": GOOD.replace(
+        "compact=1 btnPos=beside mainEndPx=174", "compact=1 btnPos=beside mainEndPx=357"),
+    "A11 收起态动作带带了外边距": GOOD.replace(
+        "mainEndPx=174 btnMarginPx=0/0", "mainEndPx=174 btnMarginPx=42/60"),
+    # 补扫路径没判出 contracted ⇒ 收起子视图建成展开结构：逐帧断言全都自洽，
+    # 只有"本轮必须有 compact=1 可测量帧"这条门能抓住它（防整段产品行为静默没跑）
+    "A11 收起子视图被建成展开结构": GOOD.replace(
+        "compact=1 btnPos=beside mainEndPx=174 btnMarginPx=0/0",
+        "compact=0 btnPos=below mainEndPx=-1 btnMarginPx=42/60"),
     "背景没有 G2 裁剪": GOOD.replace("bg clip g2 r=54.0", "bg clip g2 r=0.0"),
     # 真机踩过：A13 的 Rect.toShortString() 是 `[0,0][960,279]`，不是 AOSP 印象里的
     # `(0, 0 - 960, 279)`。日志一旦回到平台格式化字符串，正则就整条解析不到（静默少跑）。
@@ -1007,7 +1056,8 @@ BAD_CASES = {
         "11-02 23:10:03 1234 1234 I BetterOriginOS: media_card: "
         "a11 art state=expanded size=255 contentH=255"
         " scaleType=CENTER_CROP clip=false titlePx=42 subtextPx=36 timePx=42"
-        " titleMedium=1 seekVis=0 padTbPx=48 seekDur=3536000 seekSession=1\n", ""),
+        " titleMedium=1 seekVis=0 padTbPx=48 seekDur=3536000 seekSession=1"
+        " compact=0 btnPos=below mainEndPx=-1 btnMarginPx=42/60\n", ""),
     # 进度条容器的显隐判据（§15-7）：收起态没有紧凑条、展开态有时长就该有
     "A11 收起态也多画了一条进度条": GOOD.replace(
         "titleMedium=1 seekVis=8", "titleMedium=1 seekVis=0"),

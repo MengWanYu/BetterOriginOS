@@ -4437,14 +4437,27 @@ public final class NotifyRowFeature extends Feature {
         }
     }
 
-    private static boolean bigIconShowing(View root) {
+    /**
+     * 这一棵子树里有没有**我们自己的顶替大图标**（归属判据，不是"此刻可见"判据）。
+     *
+     * 不许读 alpha / isShown：展开/收起动画里 vivo 会把子树 alpha 一起写回、`isShown()` 跟着翻
+     * （逐帧实测同一行 `big=…:s0`→`:s1`→`:s0`）。上一版把判据写成"真的在显示才压"，
+     * 于是过渡那几帧判成"没有顶替"、把原生小图标放回去 ⇒ 用户看到的
+     * "展开或收起通知时小图标闪一下"。
+     *
+     * 判据**按子树**而不是按行（11-05 试过行级判据）：一份行的两份 header 拷贝里大图标常常只在
+     * 其中一份，按行判会把另一份的原生图标也压掉 ⇒ 真机读数里 `big=-` 的摘要行变成空白图标，
+     * 是一种观感换成另一种观感。两份拷贝共用同一个 Drawable 的互打由
+     * {@link #privateDrawable} 从通道上断开，不靠放宽判据。
+     *
+     * 唯一保留的硬条件是"顶替物真的有图"：drawable 为空时那枚 42dp 壳会露出空白圆角边框
+     * （`android` 包取不到应用图标那类），此时让它自己 GONE 并放回原生。
+     */
+    private static boolean bigIconOwned(View root) {
         View big = root == null ? null : findTag(root);
-        if (big == null || big.getAlpha() <= 0.5f || !big.isShown()) {
+        if (big == null) {
             return false;
         }
-        // 顶替物必须**真的有图**：`android` 这类包取不到应用图标时，我们那枚 42dp ImageView
-        // 是在、在显示，但里面没有 drawable ⇒ 压掉原生后露出的就是一个空的圆角壳
-        //（真机：vivo服务 的图标恢复了、Android 系统 的还没有，差别就在这里）。
         if (big instanceof ImageView) {
             ImageView iv = (ImageView) big;
             if (iv.getDrawable() == null) {
@@ -4463,30 +4476,34 @@ public final class NotifyRowFeature extends Feature {
         return true;
     }
 
+    /**
+     * 原生小图标的唯一压制入口。判据（该不该压）由调用方按**子树归属**决定
+     * （见 {@link #bigIconOwned}），这里只负责"写哪个通道"和"已经是目标值就别写"。
+     */
     private static void suppressNativeIcon(View ni, boolean on) {
         if (ni == null) {
             return;
         }
-        if (!on && sVerifyEnabled && ni.getScaleX() == 0f) {
-            // 谁在放开：如果切歌窗口里这条出现，那就是我们自己的恢复路径在把图标放回可见，
-            // 而不是 vivo 抬回来的 —— 两者的修法完全不同
-            Log.i(TAG, "notify_row.light.native RELEASE id="
-                    + Integer.toHexString(System.identityHashCode(ni))
-                    + " from=" + callerName());
-        }
         // 为什么不是"压视图 alpha/可见性"：逐帧实测（notify_row.trace）证明 vivo 每次重排会把
-        // 这四项一起写回可见，而我们自己的放开路径一条都没跑过（light.native RELEASE 0 条）
-        // ⇒ 按任何单一视图属性都是逐帧对写，中间那一帧就是用户看到的"闪一下"。
+        // 这四项一起写回可见 ⇒ 按任何单一视图属性都是逐帧对写，中间那一帧就是"闪一下"。
         // 真正不争抢的只有 **drawable 自己的 alpha**：vivo 的图标更新才会换 drawable，
         // 换的那一帧我们在守卫里再压一次即可（见 guardLightNativeIcon）。
+        // （更正 11-05：这里原先记的是"我们自己的放开路径一条都没跑过"，那是被旧见证的
+        //   `scaleX==0` 条件骗了——放开一直在跑，只是那条见证抓不到。放开判据见下方 RELEASE。）
+        int wasDrawable = -1;
         if (ni instanceof ImageView) {
             ImageView iv = (ImageView) ni;
             android.graphics.drawable.Drawable d = iv.getDrawable();
             if (d != null) {
+                wasDrawable = d.getAlpha();
                 // 不能把 drawable 摘成 null：那颗图标是 wrap_content，没有 drawable 就 measure 成 0，
                 // header 的列数学跟着塌 ⇒ 真机门禁当场 L3 红（标题左偏移 60px 而不是 66dp 列）。
                 // 所以改压 **drawable 自己的 alpha**：尺寸、布局、可见性全不动。
-                d.mutate().setAlpha(on ? 0 : 255);
+                // 而且已经是目标值就别再写：这条跑在每帧 pre-draw 上，`mutate()` + setAlpha
+                // 每帧都做一次就是一台永不停下的重绘机（窗口永不 idle、dump 取不到样本）。
+                if (wasDrawable != (on ? 0 : 255)) {
+                    d.mutate().setAlpha(on ? 0 : 255);
+                }
             }
         }
         // 视图 alpha/可见性只是"顺手维持"：真机证明 vivo 每次重排会把它们抬回可见，
@@ -4502,6 +4519,16 @@ public final class NotifyRowFeature extends Feature {
             if (ni.getVisibility() != View.VISIBLE) {
                 ni.setVisibility(View.VISIBLE);
             }
+        }
+        // 放开见证：只在"我们确实要把一枚**被压成 0** 的图标放回可见"那一拍打。
+        // 判据别写成 `!= 255`：vivo 自己的图标 alpha 本来就可能不是 255，那样这条会退化成
+        // "每次调用都打一条"（真机一度 502 条），把"我们在恢复"和"图标本来就不是全实"混成一谈。
+        // 判"图标忽有忽无"时这条是分诊第一现场：出现 ⇒ 我们自己在放；不出现 ⇒ 是系统抬的。
+        if (!on && sVerifyEnabled && wasDrawable == 0) {
+            Log.i(TAG, "notify_row.light.native RELEASE id="
+                    + Integer.toHexString(System.identityHashCode(ni))
+                    + " wasDa=" + wasDrawable
+                    + " from=" + callerName());
         }
     }
 
@@ -4522,7 +4549,7 @@ public final class NotifyRowFeature extends Feature {
         // drawable alpha=0 又没有顶替物，就是真机报的"图标变成空白边框"
         //（Android 系统 / vivo服务 都是组摘要行）；而且下面 guardLightNativeIcon 的
         // 每帧 pre-draw 会把它反复压回去，永不恢复。没有顶替就反过来恢复可见。
-        if (!bigIconShowing(root)) {
+        if (!bigIconOwned(root)) {
             suppressNativeIcon(ni, false);
             return;
         }
@@ -4566,7 +4593,7 @@ public final class NotifyRowFeature extends Feature {
                 return;
             }
             // 同一条纪律：只有我们放了大图标顶替的行才压；否则恢复，绝不留下空白边框
-            if (!bigIconShowing(root)) {
+            if (!bigIconOwned(root)) {
                 suppressNativeIcon(ni, false);
                 return;
             }
@@ -7367,7 +7394,7 @@ public final class NotifyRowFeature extends Feature {
         // 没有"真的在显示的顶替图标"，就不许藏原生图标 —— 组摘要行按 L7 保留原生小图标、
         // 不放大图标，一旦进了这份名单就是真机报的"圆角矩形空框"（图标被每帧 GUARD_TARGETS
         // 重新压掉，只剩壳）。这里既不进名单，还要把之前压掉的恢复回来。
-        if (!bigIconShowing(root)) {
+        if (!bigIconOwned(root)) {
             java.util.Iterator<View> it = targets.iterator();
             while (it.hasNext()) {
                 View t = it.next();

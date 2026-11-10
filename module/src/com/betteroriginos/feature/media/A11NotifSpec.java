@@ -103,8 +103,49 @@ public final class A11NotifSpec {
     /** 内容块下内缩（AOSP 模板的 notification_content_margin = 20dp；设备模板没声明这一项）。 */
     public static final int CONTENT_MARGIN_DP = 20;
 
+    /** `notification_content_margin_end`（0x010501c9）= **16dp**，是封面与文字之间的固定间隙。 */
+    public static final int CONTENT_MARGIN_END_DP = 16;
+
     /** A11 有 media_actions 且系统允许紧凑进度条时，行最小高 = notification_min_height_media = 165dp。 */
     public static final int ROW_MIN_HEIGHT_MEDIA_DP = 165;
+
+    /* ------------------------------------------------ 收起态（contracted）模板
+
+       11-05 逆清：A11 的两态是**两份不同布局**，不是同一份布局改高度——
+       `MediaStyle.makeMediaContentView` 在 `!IS_TIER_VOS` 时用 `0x03030061`
+       = `res/layout/vigour_notification_template_material_media_q.xml`（收起），
+       `makeMediaBigContentView` 用 `0x03030054` = `..._big_media_q.xml`（展开），
+       证据 `work/y7s-a11/A11-Notification-MediaStyle.java:5000-5005/5053-5058`。
+
+       两份的**动作带位置不一样**（这就是收起态要改的那一条）：
+       - 展开 big_media_q：`notification_media_content`(竖向) 里 main_column **竖向**
+         (orientation=1) 排标题/副文，`media_actions` 是它的**兄弟**、在其**下方**，
+         marginStart 14dp / marginEnd 20dp（模块现有的展开排版就是这一份，已验收，别动）。
+       - 收起 media_q：main_column **横向**(orientation=0)、minHeight=@0x030c0253、
+         marginTop=@0x030c0246(42dp)、marginStart=@0x030c0245(20dp)、**无 marginEnd 声明**；
+         里面 [main_column_container：竖向、layout_weight=1、layout_gravity=0x70=FILL_VERTICAL、
+         paddingBottom=@0x030c0242(14dp)] + [media_actions：wrap、layout_gravity=0x00800035=top|end、
+         **左右外边距一个都没写**] ⇒ 动作带在**文字右侧**，不在文字下方。 */
+
+    /** 收起态文字列的下内缩 = `vigour_notification_content_margin_bottom`(0x030c0242) = 14dp。 */
+    public static final int DEVICE_TEXT_COLUMN_PADDING_BOTTOM_DP = 14;
+
+    /** 收起态动作带的外边距是 0（上面那份 xml 里没写；14/20 只属于展开那份）。 */
+    public static final int DEVICE_COMPACT_ACTIONS_MARGIN_DP = 0;
+
+    /**
+     * 收起态给封面让出来的右边距有两套口径，都记下来，别混：
+     * <ul>
+     *   <li>模板层：`MediaStyle:5031` 在 hasLargeIcon 时把 main_column 的 marginEnd 写成
+     *       `notification_media_image_margin_end` = **72dp**（`fw_res.txt:103221`）；</li>
+     *   <li>运行时：`MediaNotificationView` 用 `artSide + notification_content_margin_end(16dp)`
+     *       覆盖它（`A11-MediaNotificationView.java:61-73`，即 {@link #mainColumnMarginEndPx}）。</li>
+     * </ul>
+     * 收起态的根是**裸 FrameLayout**（不是 MediaNotificationView），所以原生那一支只有 72dp 生效，
+     * 文字/按钮可以在水平方向压进封面里 72-artSide 那一段。我们走运行时口径（封面边长 + 16dp）：
+     * 同一个 A11 公式、且不会让文字压在封面上。差异打进见证 `mainEndPx=` 供复核。
+     */
+    public static final int DEVICE_MEDIA_IMAGE_MARGIN_END_DP = 72;
 
     /* ------------------------------------------------------------ 头部行（§20-1） */
 

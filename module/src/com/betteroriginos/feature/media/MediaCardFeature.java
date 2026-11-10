@@ -587,6 +587,31 @@ public final class MediaCardFeature extends Feature {
         }
     }
 
+    /**
+     * 补扫（{@link #installSweepHook}）路径拿不到"这次绑定出自哪个 setter"，expanded 只能是 null，
+     * 于是会把**收起子视图**建成展开结构（11-05 加紧凑排布后这条会变成观感缺陷，以前两态结构相同所以看不出来）。
+     * 这里改用系统自己的公开判据：{@code NotificationContentView.getContractedChild()/getExpandedChild()}
+     * （OS5 两者都在，work/systemui/out-src/NotificationContentView.java:379-384）。
+     * 读不到就返回 null，沿用旧的"按展开"，并把原因留在 {@code restyling ... src=} 见证里。
+     */
+    private static Boolean childRoleOf(View root) {
+        ViewParent p = root.getParent();
+        if (!(p instanceof View)) {
+            return null;
+        }
+        try {
+            if (root == XposedHelpers.callMethod(p, "getContractedChild")) {
+                return Boolean.FALSE;
+            }
+            if (root == XposedHelpers.callMethod(p, "getExpandedChild")) {
+                return Boolean.TRUE;
+            }
+        } catch (Throwable t) {
+            skipOnce("child role getter missing: " + t.getClass().getSimpleName(), root);
+        }
+        return null;
+    }
+
     /** @param expanded 收起态/展开态（A11 两条取色链不同）；null 表示沿用已有状态 */
     private void restyle(View root, Boolean expanded) {
         if (!(root instanceof ViewGroup)) {
@@ -619,10 +644,11 @@ public final class MediaCardFeature extends Feature {
                     + " title=" + (title == null ? "null" : "ok"), root);
             return;
         }
+        Boolean role = expanded != null ? expanded : childRoleOf(root);
         synchronized (CARDS) {
             MediaCard existing = CARDS.get(root);
             if (existing != null) {
-                existing.setState(expanded);
+                existing.setState(role);
                 existing.refreshColors(true);
                 return;
             }
@@ -638,9 +664,11 @@ public final class MediaCardFeature extends Feature {
         }
         String style = option(ctx, "style", "os5");
         Log.i(TAG, "restyling style=" + style + " " + root.getClass().getName()
-                + " title=" + title.getText() + " actions=" + actions.getChildCount());
+                + " title=" + title.getText() + " actions=" + actions.getChildCount()
+                + " role=" + (role == null ? "unknown" : role.booleanValue() ? "expanded" : "contracted")
+                + " src=" + (expanded != null ? "setter" : "getter"));
         MediaCard card = MediaCard.build(ctx, root, actions, title, artist, art, sourceIcon,
-                headerId, style, !Boolean.FALSE.equals(expanded));
+                headerId, style, !Boolean.FALSE.equals(role));
         synchronized (CARDS) {
             CARDS.put(root, card);
         }
@@ -1017,6 +1045,14 @@ public final class MediaCardFeature extends Feature {
         TextView a11HeaderName;
         /** a11 的进度条容器（条 + 下方两枚时间），显隐按 A11 的三判据切（§15-7） */
         ViewGroup a11SeekWrap;
+        /**
+         * 收起态（media_q 模板）的横向 main_column；展开态是 null。
+         * "这张卡是不是紧凑结构"就以它为准，seek 的判据也读它 —— A11 收起模板里那颗
+         * 进度条 ViewStub 的根不是 MediaNotificationView，从来没人 inflate 它。
+         */
+        LinearLayout a11MainRow;
+        /** 动作带本体：见证按它**实际的父级**报 btnPos，不写死自报字符串（§4.3 那条坑） */
+        LinearLayout a11Controls;
         long lastDurationMs;
         /** 条是否该显示（含「有时长」）。reclaimBar 必须尊重它，否则会与系统可见性写入互打。 */
         boolean barShouldShow = true;
@@ -1046,7 +1082,9 @@ public final class MediaCardFeature extends Feature {
             // 所以它从不参与每拍刷新。这里：行只看「有会话 && 展开」；
             // 条没有时长时只置 INVISIBLE —— 继续占位（weight 不失效），
             // 于是两枚时间的位置与行宽永远不变，切歌那一刻什么都不动。
-            boolean sessionOk = controller != null && expanded;
+            // 紧凑结构（收起态 media_q）永远不出条：原生那颗进度条在收起模板里只是
+            // 一个从没被 inflate 的 ViewStub（根是裸 FrameLayout，不是 MediaNotificationView）
+            boolean sessionOk = controller != null && expanded && a11MainRow == null;
             int wrapWant = sessionOk ? View.VISIBLE : View.GONE;
             barShouldShow = sessionOk && lastDurationMs > 0;
             if (bar != null) {
@@ -1173,6 +1211,21 @@ public final class MediaCardFeature extends Feature {
                         size = lp.height;
                     }
                 }
+                if (a11MainRow != null && size > 0
+                        && a11MainRow.getLayoutParams()
+                        instanceof android.view.ViewGroup.MarginLayoutParams) {
+                    // 收起态给封面让出来的右边距：和 A11 的 onMeasure 一样**按实测封面边长**重算
+                    // （artSide + notification_content_margin_end=16dp，A11-MediaNotificationView.java:74-80），
+                    // 不是一次性按常量钉死；否则字号一大就把按钮压在封面下面。
+                    android.view.ViewGroup.MarginLayoutParams mlp =
+                            (android.view.ViewGroup.MarginLayoutParams) a11MainRow.getLayoutParams();
+                    int wantEnd = A11NotifSpec.mainColumnMarginEndPx(size,
+                            dp(ctx, A11NotifSpec.CONTENT_MARGIN_END_DP));
+                    if (mlp.getMarginEnd() != wantEnd) {
+                        mlp.setMarginEnd(wantEnd);
+                        a11MainRow.setLayoutParams(mlp);
+                    }
+                }
                 // §15-4：两份模板的 right_icon 都是 scaleType=6=**centerCrop**（枚举表核对过，
                 // 不是 centerInside）；A11 的封面没有圆角、没有底板
                 artView.setScaleType(ImageView.ScaleType.CENTER_CROP);
@@ -1201,7 +1254,15 @@ public final class MediaCardFeature extends Feature {
                         // 进度条该不该在，判据是"展开 + 有时长 + 有会话"：只报 dur 的话，
                         // 会话被拆掉那一帧会被门禁当成"该露却没露"（其实是该藏）
                         + " seekDur=" + lastDurationMs
-                        + " seekSession=" + (controller != null ? 1 : 0));
+                        + " seekSession=" + (controller != null ? 1 : 0)
+                        // 收起态排布的三项证据，全部**回读视图实际状态**：
+                        // compact 以横向 main_column 是否存在为准，btnPos 以动作带真正的父级为准，
+                        // mainEndPx/btnMarginPx 读真正的 MarginLayoutParams —— 避免"自报常量"
+                        + " compact=" + (a11MainRow != null ? 1 : 0)
+                        + " btnPos=" + (a11Controls != null && a11Controls.getParent() == a11MainRow
+                                ? "beside" : "below")
+                        + " mainEndPx=" + endMarginOf(a11MainRow)
+                        + " btnMarginPx=" + startEndMarginOf(a11Controls));
                 if (a11SpecWitness != null) {
                     long now = android.os.SystemClock.uptimeMillis();
                     if (now - a11SpecWitnessAt > 4000) {
@@ -1224,6 +1285,26 @@ public final class MediaCardFeature extends Feature {
             }
         }
 
+        /** 见证用：读回真实的 end margin；没有这一层（展开态）就是 -1。 */
+        private static int endMarginOf(View v) {
+            if (v == null || !(v.getLayoutParams()
+                    instanceof android.view.ViewGroup.MarginLayoutParams)) {
+                return -1;
+            }
+            return ((android.view.ViewGroup.MarginLayoutParams) v.getLayoutParams()).getMarginEnd();
+        }
+
+        /** 见证用：动作带真实的 start/end 外边距（收起 0/0、展开 14dp/20dp），比回读常量硬。 */
+        private static String startEndMarginOf(View v) {
+            if (v == null || !(v.getLayoutParams()
+                    instanceof android.view.ViewGroup.MarginLayoutParams)) {
+                return "-";
+            }
+            android.view.ViewGroup.MarginLayoutParams lp =
+                    (android.view.ViewGroup.MarginLayoutParams) v.getLayoutParams();
+            return lp.getMarginStart() + "/" + lp.getMarginEnd();
+        }
+
         void setState(Boolean next) {
             if (next == null || !"a11".equals(style) || next.booleanValue() == expanded) {
                 return;
@@ -1241,6 +1322,9 @@ public final class MediaCardFeature extends Feature {
             ensureWidgetService(ctx);
             boolean m3 = "material".equals(style);
             boolean a11 = "a11".equals(style);
+            // 收起态是**另一份布局**（media_q，main_column 横向、动作带在文字右侧），
+            // 不是"展开态去掉进度条"。证据见 A11NotifSpec 的"收起态模板"一节。
+            boolean compact = a11 && !expanded;
             boolean night = isNight(ctx);
             int primary = night ? 0xFFFFFFFF : (m3 ? 0xFF2A1A15 : 0xFF241A16);
             int secondary = night ? 0xB3FFFFFF : (m3 ? 0x8C5A4038 : 0x8C322319);
@@ -1360,7 +1444,30 @@ public final class MediaCardFeature extends Feature {
                 al.topMargin = a11 ? dp(ctx, A11NotifSpec.ARTIST_MARGIN_TOP_DP) : dp(ctx, 4);
                 texts.addView(artist, al);
             }
-            if (a11) {
+            // 收起态那一行横向 main_column（media_q 模板），展开态为 null（文字直接进竖向列）
+            LinearLayout a11MainRow = compact ? new LinearLayout(ctx) : null;
+            if (compact) {
+                a11MainRow.setOrientation(LinearLayout.HORIZONTAL);
+                a11MainRow.setLayoutDirection(View.LAYOUT_DIRECTION_LTR);
+                a11MainRow.setMinimumHeight(dp(ctx, A11NotifSpec.MIN_CONTENT_HEIGHT_DP));
+                // 文字列：weight=1、填满列高、下方内缩 14dp（模板里 layout_gravity=0x70=FILL_VERTICAL）
+                texts.setPadding(0, 0, 0, dp(ctx, A11NotifSpec.DEVICE_TEXT_COLUMN_PADDING_BOTTOM_DP));
+                LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
+                tlp.gravity = Gravity.FILL_VERTICAL;
+                a11MainRow.addView(texts, tlp);
+                LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                rlp.topMargin = dp(ctx, A11NotifSpec.DEVICE_COLUMN_MARGIN_TOP_DP);
+                rlp.leftMargin = dp(ctx, A11NotifSpec.DEVICE_COLUMN_MARGIN_SIDE_DP);
+                // 给封面让出来的右边距：走 MediaNotificationView 那条运行时式子
+                // （artSide + notification_content_margin_end=16dp），artSide = 内容块高 = 42+61dp
+                rlp.rightMargin = A11NotifSpec.mainColumnMarginEndPx(
+                        dp(ctx, A11NotifSpec.DEVICE_COLUMN_MARGIN_TOP_DP
+                                + A11NotifSpec.MIN_CONTENT_HEIGHT_DP),
+                        dp(ctx, A11NotifSpec.CONTENT_MARGIN_END_DP));
+                column.addView(a11MainRow, rlp);
+            } else if (a11) {
                 // 文字列 = notification_main_column：marginTop 42dp、左右 20dp、
                 // 最小高 61dp（由 setContentMinHeight 写进来，§15-10/§20-1）
                 LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
@@ -1611,7 +1718,19 @@ public final class MediaCardFeature extends Feature {
             // getActionColor(p) == getPrimaryTextColor(p)）⇒ 原生不存在"按钮压暗到看不清"。
             // AOSP 那一支才是 48dp 方形 + 8dp 内缩 + borderless（有 ripple），记在 A11NotifSpec 里备用。
             int ctrlTint = primary;
-            if (a11) {
+            if (compact) {
+                for (ImageButton b : ordered) {
+                    addA11Control(ctx, controls, b, ctrlTint);
+                }
+                // media_q 的模板里这颗**没有写任何左右外边距**（14/20 只属于展开那份 big_media_q），
+                // 它是 main_column 的第二个子，贴顶排在文字列右边
+                LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                alp.gravity = Gravity.TOP;
+                alp.leftMargin = dp(ctx, A11NotifSpec.DEVICE_COMPACT_ACTIONS_MARGIN_DP);
+                alp.rightMargin = dp(ctx, A11NotifSpec.DEVICE_COMPACT_ACTIONS_MARGIN_DP);
+                a11MainRow.addView(controls, alp);
+            } else if (a11) {
                 for (ImageButton b : ordered) {
                     addA11Control(ctx, controls, b, ctrlTint);
                 }
@@ -1690,6 +1809,8 @@ public final class MediaCardFeature extends Feature {
                 mc.a11Column = column;
                 mc.a11HeaderName = appName;
                 mc.a11SeekWrap = seekWrap;
+                mc.a11MainRow = a11MainRow;
+                mc.a11Controls = controls;
                 mc.applyA11ArtGeometry();
                 // 规格见证：门禁据此断言尺寸（dp 换算后的 px），不依赖任何截图。
                 // 数值全部来自 LOG-1103 §20-1 的**设备分支**（IS_TIER_VOS=false ⇒ vigour 模板）；

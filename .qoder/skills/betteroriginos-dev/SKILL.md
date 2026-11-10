@@ -839,6 +839,63 @@ adb install -r build/BetterOriginOS.apk
   证据：wrapper 字段类型 + framework 布局根标签 + OS5 的 `vigour_*` 布局仍用同名类）；
   换的是 **OS5** 的 time 控件类（`com.android.internal.widget.NotificationDateTimeView`）。
 
+### 4.7 本轮（11-05 下午，A11 收起态小播放器）新增的坑
+
+- **复刻"某一态"之前，先确认那一态用的是哪份布局**。上一轮的交接把 A11 收起态写成"标准紧凑模板
+  （小图标 + 标题/文本 + compactActions）+ 圆角小封面"，**是错的**：`MediaStyle.makeMediaContentView`
+  传 `0x03030061`=`vigour_notification_template_material_media_q`、`makeMediaBigContentView` 传
+  `0x03030054`=`..._big_media_q`（`work/y7s-a11/A11-Notification-MediaStyle.java:5000-5005/5053-5058`），
+  两态**都**是媒体模板、都放 `right_icon` 封面、都无圆角；真差别只有
+  ① 动作带位置（收起在文字**右侧**、main_column 是横向；展开在文字**下方**、main_column 竖向）
+  ② 进度条有无 ③ 槽数与来源（收起=`compactActions` 前 4，展开=按顺序前 5）。
+  可复用的查法：`aapt2 dump xmltree --file res/layout/<名>.xml work/y7s-a11/vivo-res.apk` 把**两份树并排比**，
+  比读代码注释可靠；`python work/a11_res.py --dump work/y7s-a11/vivo_res.txt --name 0x030c0242` 解 dimen。
+- **`aapt2` 就在 `work/sdk-dl/bt35/android-15/aapt2.exe`**（本轮复核；DEVLOG 里"全盘未命中"那句是找错地方，
+  别据此放弃 xmltree 这条路）。
+- **"两态共用一套结构"的代码要新增形态时，先查所有能进入某一态的路径**。`installSweepHook` 走
+  `restyle(v, null)`，而 `null` 被 `!Boolean.FALSE.equals(null)` 当成"展开"——两态结构相同时这个"角色判错"
+  **完全不可见**，改紧凑结构当天就会变成观感缺陷（SystemUI 重启后收起子视图建成展开排布）。
+  分辨用系统自己的公开判据 `NotificationContentView.getContractedChild()/getExpandedChild()`
+  （`work/systemui/out-src/NotificationContentView.java:379-384`，A13/A15 都有），别猜子节点顺序，
+  并把来源打进见证（`restyling … role=contracted src=setter|getter`）。
+- **"行被展开"不等于"这张卡该出展开的东西"**：`restyleOnExpansion` 对同一行的**两块卡**都 `setState(true)`，
+  所以收起那张卡会收到 `expanded=true`。收起态永不出进度条这类判据必须挂在**结构**（有没有横向
+  main_column）上，不能挂在 `expanded` 标志上——真机见证 `state=expanded … compact=1 … seekVis=8` 就是这条。
+- **改长一条见证日志，要顺手检查所有拿它当字面锚的反例**。本轮给 `a11 art state=` 追加 4 个字段后，
+  反例「A11 只有收起态几何见证」的字面串不再命中 ⇒ `--selftest` 的"空炮"检查当场报红
+  （这就是 skill 里"字面 replace 静默失效 = 假绿"那条的自动化版本，**别把它的红当自检坏了**）。
+- **验收窗口必须覆盖"只打一次那一拍"**：`a11 card spec` 只在建卡那一打、`a11 art relief` 只在封面
+  后处理那一打。取样只做了"展开一次"就会报两条"没跑"——那是**窗口**没覆盖，不是产品坏；
+  正确窗口 = 重启建卡 → 换歌 → 收起 → 展开，四段各自 `logcat -d >> 日志` 追加。
+
+### 4.8 本轮（11-05 傍晚，"展开/收起时小图标闪一下"）新增的坑
+
+- **"有没有顶替物"的判据不许读动画驱动量**。`bigIconShowing` 里那句
+  `big.getAlpha() <= 0.5f || !big.isShown()` 把"这一行归不归我们接管"问成了
+  "顶替物此刻在不在屏上"：展开/收起动画里 vivo 连子树 alpha/可见性一起写回，过渡帧就是
+  `isShown()==false` ⇒ 判成"没有顶替" ⇒ 走恢复分支把原生小图标放回可见 ⇒ 用户看到
+  "展开或收起时小图标闪一下"。逐帧读数（`betteroriginos_trace_flicker`）：
+  `big-d1 | v0:a1.00:da255` ⇄ `v4:a0.00:da255`。判据只读**归属 + 有没有内容**
+  （`findTag(root)!=null && getDrawable()!=null`），alpha/isShown/visibility 一律不参与。
+- **0 条见证不能当"没发生"**（同一类错误今天第二次）。`RELEASE` 那条原来的条件是
+  `ni.getScaleX() == 0f`，而 scale 压制方案早就废了、没人再写 scale ⇒ 这条永远不打印，
+  昨天的记录因此写下"我们自己的放开路径一条都没跑过"。把条件换成按语义判断
+  （放开前 drawable alpha 确实为 0）后，同一台机同一套操作打出 **436 条**。
+  **凡是"某路径没跑过"的结论，先证明那条路径的打印条件本身能成立。**
+- **别把"闪"修成"空白"**：把归属判据从"子树"升到"整行"（行里任一份拷贝有大图标就全压）
+  确实止抖（`RELEASE` 526→4），但真机读数里 `big=-` 的摘要行图标跟着被压 ⇒
+  观感从"闪"变成"没有图标"。判据换作用域时，必须把**另一侧的观感读数**一起看，
+  不能只看"抖动指标归零"。
+- **加了机制就要留下"它真的跑了"的正面读数**：为"两份 header 拷贝共用同一个 Drawable"
+  这条假说写了 `privateDrawable()`（复制 constant state 再 mutate）并配
+  PRIVATE / PRIVATE-SKIP / PRIVATE-FAIL 三条见证，装机后**三条都是 0**
+  ⇒ 假说错、机制从不被调用，整体删除。同理 `mutate()`+`setAlpha` 这类每帧写要加
+  "已经是目标值就不写"的幂等门，否则自己就是一台永不停的重绘机（窗口永不 idle，dump 取不到样本）。
+- **媒体行与普通行的图标接管是两套人，别在死分支上找现象**：`guardExpandedGhost` 对媒体行
+  走 `isMediaRow` 直接 return，而 `isLightStyle()` 早已恒真 ⇒ 那里的 `morphIcon` 调用点是
+  **死代码**（真机读数 `ghost dedup`=0、`light.morph`=0 就是证据）；light 路径的飞行在
+  `guardLightMorph`。判"为什么没有某条日志"先确认哪个 caller 才活着。
+
 ## 7. 文档纪律
 
 - **OS3 验收有脚本**：`work/os3-smoke.sh [序列号] [group_mode]` —— 环境前置（防把宿主当被测环境）、
