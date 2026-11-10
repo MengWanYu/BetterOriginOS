@@ -4223,3 +4223,22 @@ RoundRelativeLayout` 无子级），重开面板时 setChild 重新绑 → 卡�
 - a11 收起态（compact）在 OS4 上的几何未单独验证（展开态已验）。
 - a11 的 QS 磁贴路径（OsProfile.isQsTilePlayer）在 OS4 不适用（媒体在通知列表，SDK34 判定
   正确），`ControlCenterMediaPlayerView` 在 OS4 插件里存在但未被使用。
+
+## 2026-11-11（凌晨续）notify_row 大图标移植 OS4：原生直接命中，结果级验收全绿
+
+上一批把 notify_row 键压在 0（防未移植行为外溢）。本轮实测：`isLightStyle` 恒真 +
+light polish 是版本无关路径，OS4（A14 framework 模板）**开键即命中**——
+
+- 开 `betteroriginos_feature_notify_row=1` 后 `restyled light bigIcon=1 geo=os5-column`
+  连发，42dp 圆角大图标进内容列、标题同排（快手/Vector/USB 各行）。
+- 结果级验收（HANDOFF-1103 §6.1 纪律，新增 `work/verify_row_os4.py`）：
+  - A1/A2 大图标 3 枚、42dp、内容列 left=36dp（dump 实测 [72,847][156,931] 等）；
+  - A3 标题与大图标同排（top ±14dp 且 title 在图标右侧——断言第一版比错了轴
+    （left 对 left），实际布局是"图标列左、文字列右"，修正后 3/3）；
+  - L1 `restyled light ... bigIcon=1 geo=os5-column` ×8。
+- A13 专属的 sep/os5-mirror 选项在 buildOptions 有 isA13OrLower 门，OS4 不显示不生效（预期）。
+- 已知同源债（非本轮回归）：组摘要行（"Android 系统"）图标空白——Z8 上同款，本轮未动。
+- SystemUI 进程 9573 自 01:50 起稳定，0 crash。
+- 验收器跑法：`python work/verify_row_os4.py <dump.xml> <logcat窗口> 2.0`
+  （dump=面板展开后的 uiautomator dump，log=开启 notify_row 之后的模块日志窗口；
+  **日志窗口必须覆盖开启之后的时段**，旧窗口会假红 L1）。
