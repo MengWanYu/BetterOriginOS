@@ -5,5 +5,8 @@
         <item>com.vivo.systemuiplugin</item>
         <item>com.android.providers.media.module</item>
         <item>com.android.filemanager</item>
+        <item>com.android.camera</item>
+        <item>com.bbk.launcher2</item>
+        <item>com.android.settings</item>
     </string-array>
 </resources>

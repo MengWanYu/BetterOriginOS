@@ -50,3 +50,5 @@ work/tmp-re-a11/a11-code-classes*.txt
 work/tmp-re-os5toos3/os3-code-classes*.txt
 work/fw-res/a1*-classes*-code.txt
 work/**/*.jar
+work/camera-re/
+work/os4-re/

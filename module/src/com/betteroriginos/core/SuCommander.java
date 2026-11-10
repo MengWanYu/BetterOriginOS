@@ -97,6 +97,39 @@ public final class SuCommander {
         main.postDelayed(r, DEBOUNCE_MS);
     }
 
+    /** 与 write 相同的串行/去抖语义，但落到 settings 的 system 命名空间。 */
+    public void writeSystem(final String key, final String value, final Result result) {
+        final String queueKey = "system:" + key;
+        Runnable old = queued.remove(queueKey);
+        if (old != null) {
+            main.removeCallbacks(old);
+        }
+        Runnable r = new Runnable() {
+            @Override
+            public void run() {
+                exec.execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        final boolean ok = runSu("settings put system " + key + " " + value);
+                        main.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (ok) {
+                                    notifyPending(pending.incrementAndGet());
+                                }
+                                if (result != null) {
+                                    result.onResult(ok);
+                                }
+                            }
+                        });
+                    }
+                });
+            }
+        };
+        queued.put(queueKey, r);
+        main.postDelayed(r, DEBOUNCE_MS);
+    }
+
     public void restartSystemUi(final Result result) {
         exec.execute(new Runnable() {
             @Override

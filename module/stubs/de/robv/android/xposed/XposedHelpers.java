@@ -50,6 +50,10 @@ public final class XposedHelpers {
         throw new UnsupportedOperationException("stub");
     }
 
+    public static void setBooleanField(Object obj, String fieldName, boolean value) {
+        throw new UnsupportedOperationException("stub");
+    }
+
     public static void setFloatField(Object obj, String fieldName, float value) {
         throw new UnsupportedOperationException("stub");
     }

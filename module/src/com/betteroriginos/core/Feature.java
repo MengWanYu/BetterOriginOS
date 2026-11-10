@@ -49,6 +49,13 @@ public abstract class Feature {
         return Collections.emptyList();
     }
 
+    /**
+     * 选项写入模块存储之后额外要做的事（设置 App 进程）。默认无。
+     * 例如把档位同步到系统 settings 的某个键，让被 hook 的进程走原生链路。
+     */
+    public void onOptionChanged(String key, String value) {
+    }
+
     public String[] scopes() {
         return new String[]{"com.android.systemui"};
     }

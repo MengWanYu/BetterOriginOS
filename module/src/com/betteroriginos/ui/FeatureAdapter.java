@@ -335,6 +335,7 @@ public class FeatureAdapter extends BaseAdapter {
                 picked -> {
                     SuCommander.get().write(Prefs.optionKey(feature.id(), opt.key), picked,
                             ok -> act.onWriteResult(ok));
+                    feature.onOptionChanged(opt.key, picked);
                     updateChoiceRow(row, opt, picked);
                     if (feature.previewKind() != null && opt == previewOption(feature)) {
                         notifyDataSetChanged();

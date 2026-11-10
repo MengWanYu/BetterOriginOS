@@ -2,6 +2,8 @@ package com.betteroriginos.core;
 
 import android.util.Log;
 
+import com.betteroriginos.feature.camera.CameraShutterFeature;
+import com.betteroriginos.feature.desktop.DesktopMotionFeature;
 import com.betteroriginos.feature.media.MediaCardFeature;
 import com.betteroriginos.feature.notify.NotifyRowFeature;
 import com.betteroriginos.feature.fileman.FileManagerRenameFeature;
@@ -22,7 +24,9 @@ public final class FeatureManager {
                     new NotifyRowFeature(),
                     new MediaCardFeature(),
                     new PickerAlbumsFeature(),
-                    new FileManagerRenameFeature()
+                    new FileManagerRenameFeature(),
+                    new CameraShutterFeature(),
+                    new DesktopMotionFeature()
             ));
 
     private FeatureManager() {

@@ -3947,3 +3947,210 @@ vivo 每帧写回）。但 `guardLightNativeIcon` 注册的是**每帧 pre-draw*
 本地 `aapt2` 不在预期路径（`find` 全盘未命中），A11 SystemUI 模板数值改用
 `work/y7s-a11/` 已有转储或重装 build-tools 后再取。
 本地有未入库的改前备份 `work/NotifyRowFeature.pre-trace-1104.java`（可删）。
+
+## 2026-11-05（OS5 / A11 播放器）收起态小播放器：按 A11 **真正的那份收起模板**重排
+
+### 先纠正上一轮交接的前提（半句错）
+
+交接写的是"收起态走标准紧凑通知模板（小图标 + 标题/文本 + compactActions 按钮）、圆角小封面"。
+实测不是：**A11 的两态是两份媒体模板**，不是"媒体卡 vs 普通紧凑行"——
+
+- `MediaStyle.makeMediaContentView`（收起）在 `!IS_TIER_VOS` 传 `50528353` = `0x03030061`
+  = `res/layout/vigour_notification_template_material_media_q.xml`
+  （`work/y7s-a11/A11-Notification-MediaStyle.java:5000-5005`）；
+- `makeMediaBigContentView`（展开）传 `50528340` = `0x03030054` = `..._big_media_q.xml`（`:5053-5058`）。
+
+两份都用 `right_icon` 放**封面**（不是应用小图标）、都无圆角（`ART_RADIUS_DP=0` 那条结论不变）。
+真正的差别只有两处：**动作带的位置**和**有没有进度条**。
+
+### 收起态的数值（`aapt2 dump xmltree` + `vivo_res.txt`/`fw_res.txt` 反查）
+
+`vigour_notification_template_material_media_q.xml`：根 = 裸 `FrameLayout`；
+`right_icon` wrap×match_parent + `adjustViewBounds` + `scaleType=6`(centerCrop)；
+`include header_q`；`notification_media_content`(竖向) 里的 `notification_main_column` 是**横向**
+（orientation=0），marginTop `0x030c0246`=42dp、marginStart `0x030c0245`=20dp、
+minHeight `0x030c0253`=64dp（运行时被 `setContentMinHeight` 写成 `0x030c0257`=61dp），里面：
+
+- 文字列 `0x010203a6`：竖向、`layout_weight=1`、`layout_gravity=0x70`=FILL_VERTICAL、
+  paddingBottom `0x030c0242`=**14dp**；
+- `media_actions`：wrap、`layout_gravity=0x00800035`=top|end、`layoutDirection=0`=ltr、
+  **左右外边距一个都没写**（14dp/20dp 只属于展开那份）；按钮 `0x03030044` = 36×40dp、
+  padding 8/6、margin 2、`scaleType=7`=centerInside；槽位收起 **4** 个、展开 **6** 个
+  （action0..4 + media_seamless）。
+- 收起只绑 `compactActions` 的前 4 个（`MS:5006-5022`，其余 setVisibility(8)），
+  展开按顺序绑前 5 个（`MS:5059-5065`）⇒ 宿主本来就替我们把子集选好了，不用自己过滤。
+
+⇒ 收起行 = 头部名 + [标题/歌手 | 按钮] + 通高封面，**没有进度条**；内容块 42+61=103dp。
+我们之前给收起态画的是"展开那份去掉进度条"（动作带在文字下方），所以行高 143dp、比原生高一档。
+
+### 三条实施要点
+
+1. **紧凑结构按 `role` 建**：`MediaCard.build` 里 `compact = a11 && !expanded` 时把文字列与动作带
+   装进同一个横向 main_column，边距/内缩全走上面那批常量（`A11NotifSpec.DEVICE_TEXT_COLUMN_PADDING_BOTTOM_DP`
+   / `DEVICE_COMPACT_ACTIONS_MARGIN_DP`）。展开那支一行代码没动。
+2. **收起永远不出进度条**：收起那份的根不是 `MediaNotificationView`，模板里的 ViewStub 没人 inflate
+   ⇒ `applyA11SeekVisibility` 的判据加"紧凑结构就不出条"。这条不是摆设：行被展开时
+   `restyleOnExpansion` 会对**两块卡**都 `setState(true)`，真机 `state=expanded … compact=1 … seekVis=8`
+   就是在验它。
+3. **给封面的右边距按 A11 的运行时式子重算**（`artSide + notification_content_margin_end(16dp)`，
+   `A11-MediaNotificationView.java:74-80` 每次 onMeasure 都重写），不是一次性钉常量。
+   模板层那条 72dp（`notification_media_image_margin_end`，`fw_res.txt:103221`）只在没有
+   MediaNotificationView 那一支生效，差异留在见证里而不是藏起来。
+
+### 顺手补的一个真坑：补扫路径分不清收起/展开
+
+`installSweepHook` 走 `restyle(v, null)`，而 null 在旧代码里被当成"展开"。以前两态结构相同所以看不出来，
+改成紧凑结构后它就变成观感缺陷（SystemUI 重启后收起子视图被建成展开排布）。现在用系统自己的公开判据
+`NotificationContentView.getContractedChild()/getExpandedChild()`
+（`work/systemui/out-src/NotificationContentView.java:379-384`）分辨，并在 `restyling` 行自报
+`role=contracted|expanded|unknown src=setter|getter`。
+
+### 取证与状态
+
+- 装机包 `166c32b166bb`（设备 `pm path` 的 sha256 前 12 位与本地一致）。
+- `work/offline-all.sh` 22 项全绿；`verify_os5_mirror.py --selftest` 新增 4 条反例（动作带翻到下方 /
+  右内缩钉成常量 / 动作带被加边距 / **整段没有 compact=1 可测量帧**）全部被抓，
+  并抓到一条旧反例因这条日志行变长而**空炮**（`A11 只有收起态几何见证` 的字面串没改到材料）——
+  正是 skill 里那条"字面 replace 静默失效 = 假绿"。
+- 真机 `work/z8os3-live/a11-compact-1105c.log` → `verify_os5_mirror.py --media-only`
+  **55 条通过 / 0 失败**：收起 `size=309=contentH compact=1 btnPos=beside mainEndPx=357 btnMarginPx=0/0 seekVis=8`；
+  展开 `size=555 compact=0 btnPos=below mainEndPx=-1 btnMarginPx=42/60 seekVis=0`（未回归）。
+- 中间两次取样窗口各红过一次，都是**窗口没覆盖到那一拍**（没有换歌就没有 relief、
+  没有建卡就没有 spec），不是产品坏；补一次"重启建卡 + 换歌 + 收起 + 展开"的窗口后全绿。
+
+### 仍未闭环（诚实记）
+
+- **A11 真机没有收起态样本**：`work/y7s-a11/live-a11-shade*.xml` 其实是 Z8 宿主的 dump
+  （有 `notification_header/app_name_text`、无 media 行），当不了 A11 证据。所以收起态封面
+  "到底多大"只有布局语义那一条推论（wrap×match_parent + adjustViewBounds ⇒ 由 largeIcon 原始
+  尺寸夹出来）；我们按"边长=内容块高"画，与展开态同一口径。
+- `aapt2` **在** `work/sdk-dl/bt35/android-15/aapt2.exe`（上一轮交接说"全盘未命中"是找错了地方），
+  本轮的三份 xmltree 就是它 dump 的。
+- 等用户上眼：收起行内容块从 429px 降到 309px（143dp→103dp），动作带回到文字右侧。
+
+## 2026-11-05（傍晚，OS5）"展开/收起时小图标闪一下"：判据读了动画驱动量
+
+用户报图标若隐若现，先要求回退对比 —— **回退到 HEAD 也闪**（包 `e6a058a48612`），
+所以不是这轮收起态音乐卡带进来的（两条路径也不相交：媒体行在 `guardExpandedGhost`
+里被 `isMediaRow` 显式排除）。定位过程本身有两条值得记账。
+
+### 真因（一句话）
+
+`bigIconShowing()` 里那句 `big.getAlpha() <= 0.5f || !big.isShown()`
+把"**有没有顶替物**"问成了"**顶替物此刻在不在屏上**"。展开/收起动画里 vivo 会连子树
+alpha/可见性一起写回，我们那枚 42dp 大图标的 `isShown()` 在过渡帧就是 0 ⇒ 判成"没有顶替"
+⇒ 走 `suppressNativeIcon(ni,false)` 把原生小图标**放回去** ⇒ 用户看到小图标闪一下，
+过渡结束又被人按回去。逐帧读数（`betteroriginos_trace_flicker`）：
+
+```
+HEAD   5f3b164  big-d1 | v0:a1.00:da255  ⇄  big-d1 | v4:a0.00:da255   ← 露出帧 / 按回帧
+HEAD   16af783  big-d1 | v0:a1.00:da255                                ← 大图标在，小图标也全程露着
+修复后 4 行 big-d1 全部稳定在        v4:a0.00:da0                      ← 没有露出帧
+```
+
+改法：判据只看**归属 + 有没有内容**（`findTag(root)!=null` 且 `getDrawable()!=null`），
+不读 alpha/isShown。"顶替物真的有图"那条硬判据保留（`android` 包空壳那种还是会让壳自己 GONE）。
+
+### 两条被数据否掉的东西（别再走）
+
+1. **"两份 header 拷贝共用同一个 Drawable ⇒ 帧频互打"**。我为它写了 `privateDrawable()`
+   （`getConstantState().newDrawable().mutate()` + `setImageDrawable`）并配了 PRIVATE/PRIVATE-SKIP/
+   PRIVATE-FAIL 三条见证，装机后 **三条都是 0 条** —— 那条路径从来没被调用。已整体删除，
+   不留不会跑的机制。真正的往复是"同一枚图标被同一个 root 一会儿判有顶替、一会儿判没有"，
+   也就是上面那条判据错，不是通道共享。
+2. **判据升到"行级"**（一整行里任一份拷贝有大图标就都压）：`RELEASE` 从 526 掉到 4、
+   确实不抖了，但真机读数里 `big=-` 的摘要行图标也被压掉 ⇒ **把"闪"换成"空白"**，
+   已回退到子树级判据。
+
+### 一条被假阴性见证喂出来的错判（今天第二次）
+
+`RELEASE` 那条日志原来的条件是 `ni.getScaleX() == 0f` —— scale 压制方案早就废了，没人再写
+scale，于是这条见证**永远不打印**，昨天的记录因此写下"我们自己的放开路径一条都没跑过
+（light.native RELEASE 0 条）"。换成按语义判断（放开前 drawable alpha 真的是 0）之后，
+同一台机同一套操作打出 **436 条**：放开一直在跑。
+教训：**0 条永远要先怀疑见证本身有没有打印条件成立**，不能直接当"没发生"的证据；
+`mutate()`+`setAlpha` 这类写也一律加"已经是目标值就不写"的幂等门，否则每帧写自己就是
+一台重绘机（窗口永不 idle，dump 都取不到）。
+
+### 仍挂着
+
+- drawable 层面还有 0↔255 的往复（436 条 RELEASE），目前被视图层 `v4:a0.00` 掩住、肉眼看不见；
+  它是"两个写者"没并干净的余债，单独跟，不在本轮硬修。
+- 组摘要行（`no-big` 那批）图标仍是 `v4:a0.00` 被藏着的状态 —— 就是上午那条
+  "`Android 系统` 图标空白"老债，本轮**没有改动它**，HEAD 与修复版读数一致。
+- 装机 `114333a5eaab`；离线 22 项全绿；对比证据
+  `work/z8os3-live/icon-trace-1105.log`（HEAD）vs `work/z8os3-live/icon-trace-1105-shipped.log`。
+  等用户上眼确认"展开/收起不再闪"。
+
+## 2026-11-05 · 0.1.2-beta 发布
+
+- 版本：`versionCode=4`，`versionName=0.1.2-beta`（`module/AndroidManifest.xml`）。
+- 成品：`out/BetterOriginOS-0.1.2-beta.apk`，sha256 前 12 位 `56c01a4db09f`、
+  md5 `cd48db6c07c5f2d24bf5a0f86bd5f775`。
+- 上传包：`out/BetterOriginOS-0.1.2-beta.zip`（290,800 字节），按 0.1.1-beta 的三件套格式打：
+  `BetterOriginOS-0.1.2-beta.apk` + `CHANGELOG-0.1.2-beta.txt`（UTF-8 BOM，含 MD5/SHA-256 两行）
+  + `MD5.txt`（`<apk 文件名>  <md5>`，LF 结尾，与旧包一致）。
+  校验过包内 apk 的 sha256 与成品一致 —— 注意上一版我先把 `.zip` 当成 apk 的**改名副本**了，
+  那是错的（旧包是 deflate 容器，233KB < apk 254KB），已重打。
+- 使用者向的更新日志：`out/CHANGELOG.md`（新增/优化/修复/已知问题/更新后五段，功能名取 `strings.xml`
+  里用户在 App 里看到的文案，不写没验证过的东西）。
+- 本轮内容（相对 0.1.1-beta）：A11 原生卡（Ocean）媒体卡样式 + **它的收起态小播放器**、
+  「OS5 通知观感」移植选项、A11 卡前景按实际对比度选族 + 全按钮统一着色 + 先取色后淡入、
+  进度条自有 id 与自持手势、OS3 不再搬 header 时间、**展开/收起时小图标闪现的修复**、
+  摘要行空白圆角边框的一批恢复。
+- 冒烟（本轮实测，全部 exit=0 / 全绿）：
+  - 离线总检 `work/offline-all.sh` → `work/offline-all-012beta.log`（22 项；含收起态 4 条新反例，
+    以及 selftest 自己抓住的一条"旧反例因日志行变长而空炮"）。
+  - 设备侧包体核对：`dumpsys package com.betteroriginos` = `0.1.2-beta / versionCode=4`，
+    设备端 `sha256sum` 与成品一致；注入 729 条模块日志、无 install failed。
+  - 媒体卡：`python work/verify_os5_mirror.py --media-only work/z8os3-live/release-012beta-media.log`
+    → **60 通过 / 0 失败**（收起态 `compact=1 btnPos=beside mainEndPx=size+16dp` 与展开态同一窗口可测）。
+    注：第一次取样只跑了"展开一次"，`collapsed` 全是 `contentH<=0` 的预布局帧 ⇒ 验收器判红是**窗口没覆盖**，
+    补做三轮"面板展开→收起"让收起子视图真的被布局出来后才过。
+  - 图标闪现：`work/z8os3-live/release-012beta-icontrace.log` —— 有大图标的采样 13 帧里
+    "原生小图标露出帧"**0 条**；同一操作在 HEAD 上是 2 行有露出帧（对比
+    `work/z8os3-live/icon-trace-1105.log`）。
+- **未跑（如实记）**：OS3（DSU / Android 13）的三套行排版门禁本轮没跑 —— 设备停在 OS5 宿主、
+  DSU 镜像未启动。`work/a11-card-gate.sh os5` 也没重跑（它自己会重启 SystemUI 并拒绝猜安全锁，
+  本轮用等价的取样 + 验收器覆盖了同样这批断言）。
+- 遗留观感债（已知问题，写进 CHANGELOG）：`Android 系统` 一类 `pkg=android` 的组摘要行图标仍缺失/空白
+  （HEAD 与本版读数一致，本轮没动）；drawable 层还有 0↔255 的往复（436 条 RELEASE）被视图层掩住，
+  看不见但两个写者没并干净。
+- 设备已还原：`betteroriginos_notify_verify=0`、`betteroriginos_trace_flicker=0`、
+  `svc power stayon false`、面板收起；媒体卡样式仍为 `a11`。
+- 工作区未提交（模块源码、验收器、DEVLOG/skill、CHANGELOG 与成品 apk/zip）。
+
+## 2026-11-10（OS4 / 新机 PD2357）桌面过渡动画：逆向 + 模块功能落地
+
+新设备：PD2357（V2357A），Android 14 / Funtouch 14.1，桌面 `com.bbk.launcher2` 14.1.0.241，
+LSPosed 换成了 **Vector 2.2**（CLI `/data/adb/lspd/cli`，没有 `lspctl`）。完整逆向与代码地图：
+`out/LOG-1110-OS4-LAUNCHER-ANIM-REVERSE.md`（罗盘日志）。
+
+- **根因**：用户可见的“桌面过渡动画”已是最高档（舒适=3），但生效的
+  `/oem/etc/launcher/attributes_preconfig.xml` 写死 `registeranimation=false`、
+  `wallpaperTargetAnimation=false`（`dynamic_blur=true`，无 `animationGrade` → 缺省 1）。
+  桌面因此走旧链路；`LauncherConfigManager`（`r1.a`）把它们解析成字段 `L/M`，getter `w0()/y0()`。
+- **第二层“层级”**：`AnimationLevelUtils.isTwoLevelAnimation()` 要求
+  `w0 && k()==1 && h()==2 && UnLockAnimManager.f0()`；`h()` 由 `power_save_type` +
+  `ro.vivo.product.series`（IQOO/其他）决定。本机 `power_save_type=1`、series=Y → h=1，two-level 关。
+  复核否掉了“MTK 强制关 launcher scale”的误判：真变量是 `LOW_PLATFORM_ANIM2=false`。
+- **落地**：新增 `feature/desktop/DesktopMotionFeature`（id `desktop_motion`，默认关，scope
+  `com.bbk.launcher2`）。实测预配置在注入前就解析完，XML 属性钩子 0 命中；主锚点改为
+  `LauncherEnvironmentManager.F1()` 拿到 config 实例后置 `L/M=true` 并 hook `w0()/y0()`。
+  只开这两个变量，`animationGrade`/two-level/动态模糊本轮没动。
+- **验证**：装 `320,062 B` 包；日志 `config patched class=r1.a fields=2/2 methods=2` +
+  `forced w0=true`；用户确认“动画生效了”。
+- **设备侧**：Vector 里模块原为 disabled/scope 空，已 `modules enable` 并加
+  `com.bbk.launcher2/0`、`com.android.settings/0` 两个 scope；功能键
+  `betteroriginos_feature_desktop_motion=1`。
+- **系统设置入口恢复**：入口在 设置 → 动态效果 → 界面动态效果，由 `SettingsItemsUtils` 扫描
+  PackageManager 动态插入（launcher manifest 的 `vivo.settings.title/order` meta-data，
+  order=100）。它被 Settings 两处判定隐藏：`DynamicEffectSettings.isItemEnabled` 对 100/300 直接 false；
+  `EnhanceDynamicSettings.isItemEnabled` 要求 `support_app_animation_window==1`（本机预配置 false ⇒
+  桌面启动写回 0）。修法：Settings scope 下 hook `EnhanceDynamicSettings.isItemEnabled`，
+  功能开启时放行 order=100。证据 `settings entry hooks=1` + `settings entry enabled=1`，用户确认“有入口了”。
+- **档位选择器**：本机原生入口缺失，模块卡片新增 `level`（无动效/高效/中等/舒适），经
+  `Feature#onOptionChanged` → `SuCommander.writeSystem("enter_exit_app_animation", v)` 走原生链路即时生效。
+- 详细逆向（页面结构、两层隐藏条件、类/方法、资源 id、素材路径）见罗盘日志 §12。
+- 未提交（`DesktopMotionFeature`、`SuCommander.writeSystem`、`Feature#onOptionChanged`、
+  FeatureManager/FeatureAdapter/strings/arrays、XposedHelpers 桩、罗盘日志 §11–12、work/os4-re）。
