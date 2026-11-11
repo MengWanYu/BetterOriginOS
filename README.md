@@ -25,7 +25,7 @@
 | 设备 | 系统 | 说明 |
 |---|---|---|
 | iQOO Z8 (PD2314) | OriginOS 5 / Android 15、OriginOS 3 / Android 13 | 通知条、媒体卡、相册修复 |
-| PD2357 (V2357A) | Funtouch 14.1 / Android 14 (OS4) | 桌面动效、相机快门、媒体卡 |
+| vivo Y37 (V2357A) | OriginOS 4 / Android 14 (OS4) | 桌面动效、相机快门、媒体卡 |
 
 要求：
 
