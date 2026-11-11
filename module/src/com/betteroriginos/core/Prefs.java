@@ -70,12 +70,33 @@ public final class Prefs {
         return value == null ? defaultValue : value;
     }
 
+    /**
+     * Settings.Global 读缓存（进程级，TTL 2s）。每次读是一次 binder 往返（system_server），
+     * 而热路径每秒都会问：媒体卡补扫的重试、col 对位的行检查、ticker 的可见性修复…
+     * 特性开关从设置 App 写入后最多 2 秒生效——体感即时。
+     */
+    private static final java.util.HashMap<String, Object[]> GLOBAL_CACHE =
+            new java.util.HashMap<>();
+    private static final long GLOBAL_TTL_MS = 2000;
+
     private static String global(Context ctx, String key) {
+        long now = android.os.SystemClock.uptimeMillis();
+        synchronized (GLOBAL_CACHE) {
+            Object[] hit = GLOBAL_CACHE.get(key);
+            if (hit != null && now - (Long) hit[1] < GLOBAL_TTL_MS) {
+                return (String) hit[0];
+            }
+        }
+        String value = null;
         try {
-            return Settings.Global.getString(ctx.getContentResolver(), key);
+            value = Settings.Global.getString(ctx.getContentResolver(), key);
         } catch (Throwable t) {
             return null;
         }
+        synchronized (GLOBAL_CACHE) {
+            GLOBAL_CACHE.put(key, new Object[]{value, Long.valueOf(now)});
+        }
+        return value;
     }
 
     private static String local(String key) {

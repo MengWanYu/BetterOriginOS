@@ -547,6 +547,17 @@ public final class MediaCardFeature extends Feature {
                             // 只挡 known；瞬态 skip（如"动作按钮还没投完"）必须允许重试——
                             // 曾把 empty-actions 的根永久拉黑（SKIP_LOGGED），剥行重建后
                             // 卡片从此补挂不上，可见行只剩原生新内容盖在旧卡上（真机 06:42 序列）。
+                            // 但也不能无限重试：死代根（内容已剥空、永不会再投按钮）会每秒
+                            // 白跑树遍历 + Settings binder 读 + 日志，持续整个面板生命周期
+                            // （真机 00:4x：76 次重试/3s 一次）。每根限 5 次，视图回收即重置。
+                            Integer tries;
+                            synchronized (SWEEP_TRIES) {
+                                tries = SWEEP_TRIES.get(v);
+                                if (tries != null && tries >= 5) {
+                                    continue;
+                                }
+                                SWEEP_TRIES.put(v, tries == null ? 1 : tries + 1);
+                            }
                             if (known) {
                                 continue;
                             }
@@ -584,6 +595,12 @@ public final class MediaCardFeature extends Feature {
         if (v == null || depth > 7) {
             return;
         }
+        // 行会同时挂着两套内容视图（contracted/expanded，一套 GONE）+ 剥行留下的死代：
+        // GONE 的 MediaNotificationView 仍在树里，不查可见性就会把它们当活体反复重试
+        //（真机 00:50：每 3s 两条 attach×skip，共 76+ 次，且每次带 Settings binder 读）。
+        if (v.getVisibility() != View.VISIBLE) {
+            return;
+        }
         // 只认 MediaNotificationView：卡片必须加在它里面。
         // MediaContainerView 是 A13 列表里的外层容器，它自己找不到 media_actions（实测），
         // 传进去只会白跑一次
@@ -607,6 +624,9 @@ public final class MediaCardFeature extends Feature {
     }
     private static final java.util.Set<View> SKIP_LOGGED =
             java.util.Collections.newSetFromMap(new java.util.WeakHashMap<View, Boolean>());
+    /** 补扫对同一根的重试次数（WeakHashMap 随视图回收清零）：死代根限 5 次，之后静默 */
+    private static final java.util.Map<View, Integer> SWEEP_TRIES =
+            new java.util.WeakHashMap<>();
 
     /**
      * 每个视图只报一次早退原因，但一定要报：
@@ -2727,8 +2747,12 @@ public final class MediaCardFeature extends Feature {
                 boolean night = isNight(ctx);
                 Bitmap src = bmp != null ? bmp : artSource();
                 int h = artHash(src);
-                String artKey = h + "/" + style + "/" + (expanded ? "e" : "c")
-                        + (night ? "n" : "l");
+                // artKey 必须带会话态：建卡那一拍 session 未绑（黑底兜底、colorized=0），
+                // 会话绑上后同一封面的取色结果完全不同（黑底 → 封面色）——
+                // 不加这一位，bind 后的 refreshColors 会被这里的去重早退拦下，
+                // 黑底滞留到下一首歌（真机 00:21 酷狗序列：session 绑上后无任何 retint）。
+                String artKey = h + "/s" + (controller != null ? 1 : 0) + "/" + style + "/"
+                        + (expanded ? "e" : "c") + (night ? "n" : "l");
                 if (h != 0 && artKey.equals(lastArtKey) && curBg != null) {
                     return;
                 }
