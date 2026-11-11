@@ -289,7 +289,10 @@ MediaProvider）的反编译。开源源码本身风险不大，但**不要把�
     设备名更正后已重建 zip 并替换 changelog/zip 两个附件，APK 未变（哈希仍与正文一致）。
   - 下载已通过代理回归验证（APK HTTP 200）。
   - 若要让 GitHub 显示 “Latest”，需要把该 release 取消 prerelease 标记（或另发正式版）。
-- **公开提交作者**：已从 `TWRP Builder` 改为 **AuroraXL**（模块 `author_info` 里的作者名，
-  邮箱 `MengWanYu@users.noreply.github.com`）。public 历史已重写并强推：
-  当前 `main` = `f930091`，release tag `v0.1.3-beta` = `75d5b76`（新根提交）。
-  主线本地历史未改写，只影响之后的提交身份。
+- **公开提交作者**：最终按用户选择关联到 **MengWanYu** 账号（GitHub 显示账号名与头像）。
+  public 历史已重写并强推：当前 `main` = `bbde2f1`，release tag `v0.1.3-beta` = `28fee09`（新根提交）。
+  早期误关联陌生账号 `AuroraXl` 的版本已被清除。
+- **提交头像**：GitHub API 不提供头像上传接口，需在网页一次操作：
+  Settings → Public profile → Avatar → Upload，
+  图片已复制到 `C:\Users\Administrator\Desktop\MengWanYu-avatar.jpg`；上传后提交头像自动更新。
+- 主线本地历史未改写；后续提交身份为 `MengWanYu <MengWanYu@users.noreply.github.com>`。
