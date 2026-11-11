@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BetterOriginOS</string>
+    <string name="tagline">%1$s · LSPosed 模块</string>
+
+    <string name="tab_home">首页</string>
+    <string name="tab_info">模块信息</string>
+    <string name="info_about_section">关于</string>
+
+    <string name="info_status_title">生效状态</string>
+    <string name="info_pending_none">所有修改已生效</string>
+    <string name="info_pending_format">本次运行已修改 %1$d 项，重启 SystemUI 后生效</string>
+    <string name="info_scope_title">作用域</string>
+    <string name="info_scope_hint">新增作用域需在 LSPosed 管理器中勾选，并重启对应应用</string>
+
+    <string name="feature_notify_title">通知条美化</string>
+    <string name="feature_notify_summary">通知条外观风格；iOS 风格为测试版，边界等问题持续维护</string>
+    <string name="option_notify_style_title">样式</string>
+    <string name="option_notify_style_summary">iOS：卡片与堆叠（测试版）；原生优化：保留系统卡片，只放大图标并优化标题排版</string>
+    <string name="notify_style_ios">iOS 风格（测试版）</string>
+    <string name="notify_style_light">原生优化（大图标+标题）</string>
+    <string name="option_group_mode_title">分组方式</string>
+    <string name="option_group_mode_summary">测试版 iOS 堆叠：同 app 多条折叠成一叠；分离：每条独立成卡</string>
+    <string name="group_mode_stack">iOS 折叠堆叠</string>
+    <string name="group_mode_separate">完全分离</string>
+    <string name="option_stack_metrics_title">卡片堆叠参数</string>
+    <string name="option_stack_metrics_summary">iOS：16dp 边距 / 8dp 间距 / 20dp 圆角</string>
+    <string name="stack_metrics_ios">iOS 堆叠</string>
+    <string name="stack_metrics_os5">OS5 原生</string>
+    <string name="feature_media_title">通知中心媒体卡</string>
+    <string name="feature_media_summary">替换通知栏媒体卡为自定义样式</string>
+    <string name="feature_fileman_title">文件管理重命名修复</string>
+    <string name="feature_fileman_summary">解除文件管理重命名 56 字符限制（提升至 85，覆盖长下载文件名）</string>
+    <string name="feature_picker_title">媒体选择器相册修复</string>
+    <string name="feature_picker_summary">照片选择器显示全部自建相册（修复系统仅显示默认相册）</string>
+    <string name="note_picker_no_landing">本机系统没有可达的照片选择器，开启后无可见变化；切回 OS5 会直接生效。</string>
+    <string name="note_notify_actions_a13">本机系统只在展开后渲染动作按钮，故收起态保留展开箭头。</string>
+    <string name="feature_camera_title">相机快门样式</string>
+    <string name="feature_camera_summary">把拍照按钮改成 OS5 原子设计环（外径与点击热区沿用原生，只换外观）</string>
+    <string name="note_camera_no_landing">本机相机版本里没找到快门按钮的落点，开启后无可见变化。</string>
+    <string name="feature_desktop_motion_title">桌面动效增强</string>
+    <string name="feature_desktop_motion_summary">开启本机被 OEM 预配置关闭的打开/退出动画与壁纸缩放（实验）</string>
+    <string name="note_desktop_motion_reboot">恢复低端机被阉割的过渡动画和壁纸缩放，hook后重启桌面生效</string>
+    <string name="option_desktop_level_title">动画档位</string>
+    <string name="option_desktop_level_summary">调整打开/退出应用动画（写入系统设置，立即生效）</string>
+    <string name="level_none">无动效</string>
+    <string name="level_efficient">高效</string>
+    <string name="level_medium">中等</string>
+    <string name="level_comfort">舒适</string>
+    <string name="category_notify">通知</string>
+    <string name="category_media">媒体</string>
+    <string name="category_camera">相机</string>
+    <string name="category_desktop">桌面</string>
+    <string name="option_style_title">卡片样式</string>
+    <string name="option_style_summary">选择媒体卡的视觉风格</string>
+    <string name="style_os5_title">OS5 原子随身听</string>
+    <string name="style_m3_title">Material You</string>
+    <string name="style_a11_title">Android 11 原生卡（Ocean）</string>
+    <string name="option_qs_seek_title">OS3 播放器磁贴进度条</string>
+    <string name="option_qs_seek_summary">在控制中心播放器磁贴底部加一条可拖动进度条（OriginOS 3）</string>
+
+    <string name="app_features_format">%1$d 项功能 · %2$d 已启用</string>
+
+    <string name="author_info">作者 · AuroraXL</string>
+    <string name="restart">重启 SystemUI</string>
+    <string name="restarting">正在重启 SystemUI…</string>
+    <string name="restart_failed">重启失败，请手动重启 SystemUI 或手机</string>
+    <string name="restart_note">重启会短暂黑屏，随后自动恢复</string>
+    <string name="restart_required_note">修改功能或样式后需重启 SystemUI 生效</string>
+
+    <string name="write_ok">已保存</string>
+    <string name="write_fail">写入失败，请检查 KernelSU 授权</string>
+
+    <string name="dialog_cancel">取消</string>
+    <string name="dialog_restart_title">重启 SystemUI？</string>
+    <string name="dialog_restart_message">修改将在重启后生效；重启会短暂黑屏，随后自动恢复。</string>
+
+    <string name="search_hint">搜索功能与选项</string>
+    <string name="preview_song">示例歌曲</string>
+    <string name="preview_artist">示例歌手 · 示例专辑</string>
+
+    <string name="footer">BetterOriginOS · iQOO Z8</string>
+
+    <string name="cd_back">返回</string>
+    <string name="cd_selected">已选择</string>
+    <string name="option_list_overlap_title">列表重叠覆盖</string>
+    <string name="option_list_overlap_summary">像 iOS 一样让上一条通知压住下一条，滚动时逐条露出。重叠带内点击可能落到下层（实验）</string>
+    <string name="list_overlap_off">关闭（8dp 间隙）</string>
+    <string name="list_overlap_6">轻微（6dp）</string>
+    <string name="list_overlap_10">明显（10dp）</string>
+    <string name="option_sep_title">OS5 通知观感</string>
+    <string name="option_sep_summary">把 OS5 的通知几何移植到本机：连续角卡片、收纳栏间距与浮动一键清除（原生优化样式）</string>
+    <string name="sep_off">关闭（本机原生）</string>
+    <string name="sep_os5">OS5 复刻</string>
+</resources>

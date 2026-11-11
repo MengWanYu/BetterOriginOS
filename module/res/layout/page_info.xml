@@ -1,0 +1,239 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:clipToPadding="false"
+    android:fillViewport="true"
+    android:scrollbars="none">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingBottom="24dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="@dimen/page_margin"
+            android:layout_marginTop="@dimen/page_title_top"
+            android:fontFamily="sans-serif-medium"
+            android:text="@string/tab_info"
+            android:textColor="@color/text_primary"
+            android:textSize="@dimen/page_title_size" />
+
+        <!-- 应用信息（iOS 风格：section 标题在卡外，卡内为行） -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="24dp"
+            android:layout_marginTop="18dp"
+            android:layout_marginBottom="6dp"
+            android:text="@string/info_about_section"
+            android:textColor="@color/section_label"
+            android:textSize="12sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="@dimen/page_margin"
+            android:layout_marginStart="@dimen/page_margin"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:minHeight="60dp"
+                android:orientation="horizontal"
+                android:paddingEnd="@dimen/card_pad_h"
+                android:paddingStart="@dimen/card_pad_h"
+                android:paddingBottom="8dp"
+                android:paddingTop="8dp">
+
+                <FrameLayout
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:background="@drawable/bg_icon">
+
+                    <ImageView
+                        android:layout_width="26dp"
+                        android:layout_height="26dp"
+                        android:layout_gravity="center"
+                        android:importantForAccessibility="no"
+                        android:src="@drawable/app_logo" />
+                </FrameLayout>
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="sans-serif-medium"
+                        android:text="@string/app_name"
+                        android:textColor="@color/text_primary"
+                        android:textSize="16sp" />
+
+                    <TextView
+                        android:id="@+id/info_version"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="@dimen/row_summary_size" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginStart="72dp"
+                android:background="@color/divider" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minHeight="44dp"
+                android:gravity="center_vertical"
+                android:paddingEnd="@dimen/card_pad_h"
+                android:paddingStart="@dimen/card_pad_h"
+                android:text="@string/author_info"
+                android:textColor="@color/text_secondary"
+                android:textSize="@dimen/row_summary_size" />
+        </LinearLayout>
+
+        <!-- 生效状态 -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="24dp"
+            android:layout_marginTop="22dp"
+            android:layout_marginBottom="6dp"
+            android:text="@string/info_status_title"
+            android:textColor="@color/section_label"
+            android:textSize="12sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="@dimen/page_margin"
+            android:layout_marginStart="@dimen/page_margin"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/info_pending"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="48dp"
+                android:gravity="center_vertical"
+                android:paddingEnd="@dimen/card_pad_h"
+                android:paddingStart="@dimen/card_pad_h"
+                android:textColor="@color/text_primary"
+                android:textSize="@dimen/row_title_size" />
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginStart="@dimen/card_pad_h"
+                android:background="@color/divider" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingBottom="10dp"
+                android:paddingEnd="@dimen/card_pad_h"
+                android:paddingStart="@dimen/card_pad_h"
+                android:paddingTop="8dp"
+                android:text="@string/restart_note"
+                android:textColor="@color/text_tertiary"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <!-- 重启（iOS 风格：section 内蓝色文字按钮行） -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="@dimen/page_margin"
+            android:layout_marginStart="@dimen/page_margin"
+            android:layout_marginTop="@dimen/card_gap"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/restart"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@drawable/bg_item_single"
+                android:foreground="?android:attr/selectableItemBackground"
+                android:gravity="center"
+                android:minHeight="48dp"
+                android:text="@string/restart"
+                android:textColor="@color/accent"
+                android:textSize="@dimen/row_title_size" />
+        </LinearLayout>
+
+        <!-- 作用域 -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="24dp"
+            android:layout_marginTop="22dp"
+            android:layout_marginBottom="6dp"
+            android:text="@string/info_scope_title"
+            android:textColor="@color/section_label"
+            android:textSize="12sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="@dimen/page_margin"
+            android:layout_marginStart="@dimen/page_margin"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/info_scope"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="44dp"
+                android:gravity="center_vertical"
+                android:paddingEnd="@dimen/card_pad_h"
+                android:paddingStart="@dimen/card_pad_h"
+                android:textColor="@color/text_primary"
+                android:textSize="@dimen/row_title_size" />
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginStart="@dimen/card_pad_h"
+                android:background="@color/divider" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingBottom="10dp"
+                android:paddingEnd="@dimen/card_pad_h"
+                android:paddingStart="@dimen/card_pad_h"
+                android:paddingTop="8dp"
+                android:text="@string/info_scope_hint"
+                android:textColor="@color/text_tertiary"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="22dp"
+            android:gravity="center"
+            android:text="@string/footer"
+            android:textColor="@color/text_tertiary"
+            android:textSize="11sp" />
+    </LinearLayout>
+</ScrollView>

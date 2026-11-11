@@ -1,0 +1,16 @@
+# build outputs / local keystores
+build/
+*.apk
+*.dex
+debug.keystore
+build-log.txt
+*.log
+
+# tooling caches
+__pycache__/
+*.pyc
+
+# IDE / OS
+.idea/
+*.iml
+.DS_Store
