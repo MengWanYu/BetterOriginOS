@@ -289,3 +289,7 @@ MediaProvider）的反编译。开源源码本身风险不大，但**不要把�
     设备名更正后已重建 zip 并替换 changelog/zip 两个附件，APK 未变（哈希仍与正文一致）。
   - 下载已通过代理回归验证（APK HTTP 200）。
   - 若要让 GitHub 显示 “Latest”，需要把该 release 取消 prerelease 标记（或另发正式版）。
+- **公开提交作者**：已从 `TWRP Builder` 改为 **AuroraXL**（模块 `author_info` 里的作者名，
+  邮箱 `MengWanYu@users.noreply.github.com`）。public 历史已重写并强推：
+  当前 `main` = `f930091`，release tag `v0.1.3-beta` = `75d5b76`（新根提交）。
+  主线本地历史未改写，只影响之后的提交身份。
