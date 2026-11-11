@@ -611,7 +611,7 @@ public final class MediaCardFeature extends Feature {
     /**
      * 每个视图只报一次早退原因，但一定要报：
      * "媒体卡没出现"过去完全没有线索，只能靠猜（实测踩过 20 分钟）。
-     * 以前只报类名含 "Media" 的根——OS4（Funtouch 14.1）媒体模板根是普通
+     * 以前只报类名含 "Media" 的根——OS4（OriginOS 4 / Android 14）媒体模板根是普通
      * FrameLayout/LinearLayout，那条过滤把真正的媒体行 skip 吞成了静默，
      * 移植期间一无所见。改成全量（每根实例一条，WeakHashMap 去重兜住量）。
      */
@@ -668,7 +668,7 @@ public final class MediaCardFeature extends Feature {
 
     /**
      * 媒体模板探测（OS4 适配）：OS5/OS3 的模板（collapsed=notification_media_content 族）
-     * 靠 media_actions/title id 就能认；OS4（Funtouch 14.1）的**展开态**是 framework
+     * 靠 media_actions/title id 就能认；OS4（OriginOS 4 / Android 14）的**展开态**是 framework
      * MediaStyle 族（action0..4、无 media_actions、artwork 无 id）——逐级兜底：
      * actions = media_actions → action0 的父容器；art = right_icon → 子树里最大的
      * 方形 ImageView（排除小图标）。任何一级命中老 id 就走老路径，零回归。

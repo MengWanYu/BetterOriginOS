@@ -1,7 +1,7 @@
 # OS4 桌面过渡动画逆向（罗盘日志）
 
 - 日期：2026-11-10
-- 设备：PD2357（V2357A），Android 14 / Funtouch 14.1（`ro.build.display.id=PD2357_A_14.0.20.8.W10.V000L1`）
+- 设备：**vivo Y37**，Android 14 / OriginOS 4（OS4；机型代码 V2357A，`ro.build.display.id=PD2357_A_14.0.20.8.W10.V000L1`）
 - 桌面：`com.bbk.launcher2` 14.1.0.241（versionCode 141000241，targetSdk 34）
 - 目的：查清这台机“系统桌面过渡动画”的层级限制在哪、怎么开启；供以后直接复用。
 

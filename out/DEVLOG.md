@@ -4120,9 +4120,9 @@ scale，于是这条见证**永远不打印**，昨天的记录因此写下"我�
   `svc power stayon false`、面板收起；媒体卡样式仍为 `a11`。
 - 工作区未提交（模块源码、验收器、DEVLOG/skill、CHANGELOG 与成品 apk/zip）。
 
-## 2026-11-10（OS4 / 新机 PD2357）桌面过渡动画：逆向 + 模块功能落地
+## 2026-11-10（OS4 / vivo Y37）桌面过渡动画：逆向 + 模块功能落地
 
-新设备：PD2357（V2357A），Android 14 / Funtouch 14.1，桌面 `com.bbk.launcher2` 14.1.0.241，
+新设备：**vivo Y37**，Android 14 / OriginOS 4（OS4；机型代码 V2357A，raw `ro.vivo.product.model=PD2357`），桌面 `com.bbk.launcher2` 14.1.0.241，
 LSPosed 换成了 **Vector 2.2**（CLI `/data/adb/lspd/cli`，没有 `lspctl`）。完整逆向与代码地图：
 `out/LOG-1110-OS4-LAUNCHER-ANIM-REVERSE.md`（罗盘日志）。
 
@@ -4157,7 +4157,7 @@ LSPosed 换成了 **Vector 2.2**（CLI `/data/adb/lspd/cli`，没有 `lspctl`）
 
 ## 2026-11-11（凌晨，无人值守）OS4 适配第二批：媒体卡三样式 + 快门录像态 + 选择器探测
 
-设备 PD2357（V2357A，Funtouch 14.1 / Vector 2.2）。上一批（c8ad62c）只落地了桌面动效；
+设备 vivo Y37（Android 14 / OriginOS 4，Vector 2.2）。上一批（c8ad62c）只落地了桌面动效；
 本批把相机快门、媒体卡、选择器全部过完并提交（55863f3）。
 
 ### 快门（OS4 直接命中，修一处）

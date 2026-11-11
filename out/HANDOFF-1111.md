@@ -7,7 +7,7 @@
 
 ## 0. 一句话现状
 
-模块已从"只在 iQOO Z8（OS5/OS3）可用"扩到 **Android 14 / Funtouch 14.1（OS4）** 机型，
+模块已从"只在 iQOO Z8（OS5/OS3）可用"扩到 **Android 14 / OriginOS 4（OS4）** 机型（vivo Y37），
 相机快门、桌面动效、媒体卡三样式、通知条大图标、媒体选择器五项均已真机验收。
 **唯一没闭环的是用户最后报的一条：Android 11 样式下《读心术》切歌后左侧仍黑。**
 已发布 `0.1.3-beta`（versionCode 5，`out/BetterOriginOS-0.1.3-beta.zip`），
@@ -21,9 +21,13 @@
 |---|---|
 | 工作目录 | `C:\Users\Administrator\Desktop\Aiqooz8-os5-mod`（用户改过名，**不要硬编码**） |
 | 分支 | `master`，HEAD = `da08510`（发布提交） |
-| OS4 测试机 | PD2357 / V2357A，Android 14，Funtouch 14.1，adb 序列号 `10AE742ZRF000HY` |
+| OS4 测试机 | **vivo Y37**，Android 14 / OriginOS 4（OS4），adb 序列号 `10AE742ZRF000HY`；机型代码 V2357A（raw `ro.vivo.product.model=PD2357`） |
 | OS5 机 | iQOO Z8 / PD2314，`10AE4Y0MDE000BL`（本轮未使用） |
 | 注入框架 | **Vector 2.2**（CLI 在 `/data/adb/lspd/cli`，**没有 lspctl**） |
+
+> 更正（2026-11-11 用户指出）：OS4 测试机是 **vivo Y37**，系统是 **OriginOS 4**
+> （Android 14），不是 Funtouch 14.1。早前把 `ro.vivo.os.name=Funtouch` 当成了系统名，
+> 本文与相关日志已按正确叫法改写。
 | **设备状态** | **用户已将设备拿走，当前 adb 无设备**。接手前先 `adb devices` 确认 |
 
 Vector 常用命令（与 LSPosed 的 lspctl 不同）：
@@ -257,3 +261,31 @@ MediaProvider）的反编译。开源源码本身风险不大，但**不要把�
 3. 若设备回来了：开 a11 样式 → 放《读心术》→ 按 §2.1 的三件套取证
    （dump + 日志 + 同帧像素），先确认"左边黑的是卡片底还是浮雕"。
 4. 别信截图单帧，别信"日志对了就等于画对了"——本轮这两条各骗过我一次。
+
+---
+
+## 9. 开源进展（2026-11-11 晚，已完成）
+
+- **公开仓库**：<https://github.com/MengWanYu/BetterOriginOS>（public，默认分支 `main`）。
+- **本地分支**：独立 worktree `C:\Users\Administrator\Desktop\Aiqooz8-public`，
+  orphan 分支 `public`，根提交 `baf4a1d`，已推送为 `origin/main`；**主线 master 不受影响**。
+- **公开内容**：`module/`（src/res/stubs/assets/build.sh）、`vivo-OriginUI/lib` + `docs`、
+  `demo/`、`README.md`、MIT `LICENSE`、`.gitignore`；共 181 个文件、34,015 行。
+- **排除**：`out/`、`work/`、`export/`、构建日志、旧 `patch_*.py`、`debug.keystore`、厂商二进制。
+  已扫描确认：公开树无设备序列号、无本机路径、无 apk/dex/jar/so。
+- **构建可移植**：两个 `build.sh` 改为 `ANDROID_HOME` / `JAVA` / `ANDROID_BUILD_TOOLS` /
+  `ANDROID_JAR` 可覆盖，Windows/Linux 两用；module 与 demo 均已在本机构建通过。
+- **凭据**：Git Credential Manager（Windows 凭据管理器），GitHub 账号 `MengWanYu`，
+  classic PAT（scope `gist, repo, workflow`）已长期保存；以后 push 不再需要输入。
+- **网络注意**：本机直连 `github.com` 不通、`api.github.com` 正常；git 推送依赖
+  加速器代理 `127.0.0.1:7897`，且该仓库本地配置了 `http.sslBackend=schannel`
+  （只写在 public worktree 的仓库配置里，未改全局）。代理关闭时推送会失败。
+- 本机全局 `http.sslVerify=false` 是既有配置（非本次改动）；公开树不含任何令牌。
+  如不再需要长期凭据，可在 GitHub → Settings → Applications 撤销该 PAT。
+- **Release 已发布**：<https://github.com/MengWanYu/BetterOriginOS/releases/tag/v0.1.3-beta>
+  - tag `v0.1.3-beta`（指向公开根提交 `baf4a1d`），标记为 **prerelease**；
+  - 附件：`BetterOriginOS-0.1.3-beta.apk`（324,158 B）、`BetterOriginOS-0.1.3-beta.zip`（302,767 B）、
+    `CHANGELOG-0.1.3-beta.txt`（4,019 B）；正文即更新日志（含“已知问题：a11 读心术左黑”）。
+    设备名更正后已重建 zip 并替换 changelog/zip 两个附件，APK 未变（哈希仍与正文一致）。
+  - 下载已通过代理回归验证（APK HTTP 200）。
+  - 若要让 GitHub 显示 “Latest”，需要把该 release 取消 prerelease 标记（或另发正式版）。
