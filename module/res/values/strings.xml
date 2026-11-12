@@ -51,6 +51,12 @@
     <string name="category_media">媒体</string>
     <string name="category_camera">相机</string>
     <string name="category_desktop">桌面</string>
+    <string name="category_system">系统</string>
+    <string name="feature_updater_guard_title">系统升级防护</string>
+    <string name="feature_updater_guard_summary">升级包只下载到 Download 并通知路径；不自动安装、不倒计时、不重启（防掉 root）</string>
+    <string name="note_updater_guard">开启后安装包只保留在 Download，升级需要你手动处理；关掉“只下载不安装”或整项功能后，需重启升级器才恢复原生流程。</string>
+    <string name="option_updater_download_only_title">只下载不安装</string>
+    <string name="option_updater_download_only_summary">下载完成后把升级包留在 Download 并通知路径（下次打开升级器生效）</string>
     <string name="option_style_title">卡片样式</string>
     <string name="option_style_summary">选择媒体卡的视觉风格</string>
     <string name="style_os5_title">OS5 原子随身听</string>

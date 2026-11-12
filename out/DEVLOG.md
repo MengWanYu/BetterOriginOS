@@ -4305,3 +4305,47 @@ offline-all 24 项绿；a11 卡结构 dump（texts=[80,412] a11 位、header 行
   后续优化项与验收标准都在性能线文档里。
 - 酷狗精简版替换 bbkmusic 成为活跃媒体源（进度条通知每 3 秒更新）——
   新的取色/补扫压力源，测试覆盖已换源。
+
+## 2026-11-12（Z8 / OS5）系统升级器逆向 + 防自动重启 hook
+
+用户要求：升级包下载完不要自动倒计时、不要自动重启，按钮点“重启”也不能重启（防掉 root）。
+完整逆向与证据：`out/LOG-1112-UPDATER-REVERSE.md`。
+
+- **当前升级包**（update_info.xml 快照）：`15.2.19.1.W10.V000L1`，type=full，
+  `202610262028094ad48fade6c32367fe1dbdc1f86c02f7.zip`，8,053,346,114 B，
+  sha256 `01f02afc…`；`redir.do` 裸请求返回 500，直链绑定升级器会话，无法离线还原。
+- **重启链**：`PopDialogUtils.showRebootInduceDialog(..., z5=countdown)` →
+  `countdownDialog()` 10 秒 `CountDownTimer` → `DialogEvent(13)` →
+  `BaseUpdateStrategy` → `n0.a.C(ctx, UPDATE_NOW_COUNT)` → `n0.a.D` →
+  `PowerManager.reboot("reboot-ab-update")`；正按钮“立即重启”走 `DialogEvent(10)` → 同一条。
+  旁路：`CommonUtils.shutdown`、`RecoverySystem.installPackage`、`UpdateTipsService$c` 夜间倒计时、
+  `UpdateManager.setRebootInduceAlarmClock` 定时闹钟。
+- **落地**：新增 `feature/updater/UpdaterGuardFeature`（id `updater_guard`，默认开，
+  scope `com.bbk.updater` + `com.vivo.cota`）；hook `n0.a.D`、`PowerManager.reboot`、
+  `RecoverySystem.installPackage`、重启对话框（强制 z5=false）、两处倒计时、shutdown、
+  夜间倒计时、定时闹钟。
+- **只下载不安装**（用户追加）：下载器初始化读
+  `CommonUtils.getUpdatePackageDirectory(ctx,"ota_pacakge")`，A/B 默认在
+  `/data/ota_package/OTAPackage`；hook 改返 `/storage/emulated/0/Download`，下载直接落 Download。
+  `CommonUtils.startInstall(Context,String)` 是启动 `InstallService` 的唯一入口，hook 拦截；
+  `DownloadReceiver` 在 `com.vivo.updater.download.status.change` 后按
+  `UpdateDownloadManager.getDownloadInfo(task).getFileName()` 发通知「升级包已下载」+ 路径。
+  卡片新增 `download_only` 开关（默认开）。
+- **验证**：装机 328,254 B；updater 进程 `hooks=14`、`enabled=1`；LSPosed scope 已加。
+- **真实下载已闭环（2026-11-12 22:21）**：用户点“下载并安装”后，
+  `/storage/emulated/0/Download/2026...f7.zip` 大小 `8053346114` B、
+  sha256 `01f02afc…`，与升级信息完全一致；同目录 `.zip.temp` 0 B 为残留。
+  日志 `blocked startInstall` + `download done path=…`，没有安装/重启。
+- **第三方手动安装时系统升级出现进度**：`com.moran.updater` 用 root 脚本
+  `/data/ota_package/OTA/instpayload.sh` 启动 `update_engine_client2`（脚本无 reboot）；
+  `com.bbk.updater` 的 `UpdateManager` 构造时 bind 了系统 `UpdateEngine`，会收到任何客户端的
+  `onStatusUpdate`，所以它只是显示同一次安装的进度，不是第二个安装器。
+  `checkIfUndoUpdate` 只在 updater 自己的 reset/start 路径调用，不会取消第三方会话。
+- **事故**：为加载“防删除”新 hook 重启 updater，导致第三方引擎在 62.5% 被
+  `kUserCanceled(48)` 取消。系统仍是旧版 15.2.18.0（slot `_b`）、安装包完整、root 未掉。
+  教训：第三方安装进行中不要 force-stop/重启 updater。
+- **防删除**：`IOUtils.deleteFileImpl` 递归删除；updater 成功后清理会对已改到 Download 的目录
+  调 `g0.a.h/m`。新增 `checkIfNeedToDeletePackageAfterUpdate`/`clearDownloadPackage`/
+  `IOUtils.deleteFile(Impl)`/`g0.a.n/h/m` hook，保护 Download 与包（实测 `blocked deleteDir`）；
+  总 hook 数 `hooks=22`。
+- 仍未验：第三方重新安装到 100%、下载完成后弹重启框、按钮“重启”的破坏性测试。

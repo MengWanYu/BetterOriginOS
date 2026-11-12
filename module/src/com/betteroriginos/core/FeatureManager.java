@@ -9,6 +9,7 @@ import com.betteroriginos.feature.media.MediaCardFeature;
 import com.betteroriginos.feature.notify.NotifyRowFeature;
 import com.betteroriginos.feature.fileman.FileManagerRenameFeature;
 import com.betteroriginos.feature.picker.PickerAlbumsFeature;
+import com.betteroriginos.feature.updater.UpdaterGuardFeature;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -27,7 +28,8 @@ public final class FeatureManager {
                     new PickerAlbumsFeature(),
                     new FileManagerRenameFeature(),
                     new CameraShutterFeature(),
-                    new DesktopMotionFeature()
+                    new DesktopMotionFeature(),
+                    new UpdaterGuardFeature()
             ));
 
     private FeatureManager() {

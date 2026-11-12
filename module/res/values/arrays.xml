@@ -8,5 +8,7 @@
         <item>com.android.camera</item>
         <item>com.bbk.launcher2</item>
         <item>com.android.settings</item>
+        <item>com.bbk.updater</item>
+        <item>com.vivo.cota</item>
     </string-array>
 </resources>
