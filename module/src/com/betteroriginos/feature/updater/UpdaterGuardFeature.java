@@ -53,6 +53,10 @@ public final class UpdaterGuardFeature extends Feature {
 
     private static volatile Boolean sEnabled;
     private static final Set<String> WITNESS = Collections.synchronizedSet(new HashSet<String>());
+    private static volatile int sInstalledHooks;
+    private static final java.util.concurrent.atomic.AtomicInteger BLOCKS =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private static volatile boolean sHeartbeatStarted;
 
     @Override
     public String id() {
@@ -266,8 +270,38 @@ public final class UpdaterGuardFeature extends Feature {
         // 7) 安装包保留：拦住 updater 的“成功后清理”，避免递归删掉整个 Download。
         hooks += hookKeepPackage(cl, sb);
 
+        sInstalledHooks = hooks;
         Log.i(TAG, "updater guard installed pkg=" + UPDATER + " hooks=" + hooks + " by" + sb);
         guardEnabled();   // 安装期自报一次 enabled=0/1（取不到 Context 时首个拦截点会再报）
+        startHeartbeat();
+    }
+
+    /** 调试模式下每 60 秒一条低频心跳；开关关闭后静默，不需要重启进程。 */
+    private static void startHeartbeat() {
+        if (sHeartbeatStarted) {
+            return;
+        }
+        sHeartbeatStarted = true;
+        final Handler h = new Handler(Looper.getMainLooper());
+        h.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Context ctx = currentApp();
+                    if (ctx == null) {
+                        ctx = systemContext();
+                    }
+                    if (ctx != null && Prefs.debugEnabled(ctx)) {
+                        Log.i(TAG, "updater guard alive pid=" + android.os.Process.myPid()
+                                + " hooks=" + sInstalledHooks
+                                + " enabled=" + (guardEnabled() ? 1 : 0)
+                                + " blocks=" + BLOCKS.get());
+                    }
+                } catch (Throwable ignored) {
+                }
+                h.postDelayed(this, 60000L);
+            }
+        }, 10000L);
     }
 
     private static int hookDownloadOnly(ClassLoader cl, Class<?> common, StringBuilder sb) {
@@ -630,6 +664,7 @@ public final class UpdaterGuardFeature extends Feature {
     }
 
     private static void block(String what) {
+        BLOCKS.incrementAndGet();
         once(what, "updater guard blocked " + what);
     }
 

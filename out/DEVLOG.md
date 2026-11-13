@@ -4349,3 +4349,16 @@ offline-all 24 项绿；a11 卡结构 dump（texts=[80,412] a11 位、header 行
   `IOUtils.deleteFile(Impl)`/`g0.a.n/h/m` hook，保护 Download 与包（实测 `blocked deleteDir`）；
   总 hook 数 `hooks=22`。
 - 仍未验：第三方重新安装到 100%、下载完成后弹重启框、按钮“重启”的破坏性测试。
+
+## 2026-11-13（OS 15.2.19.1）OTA 后模块未加载 + 调试模式/心跳
+
+- OTA 后 root 变 Magisk，LSPosed 2.2.1 的模块 DB（含 WAL）显示模块 enabled、6 个 scope 全在、
+  APK 路径与 `pm path` 一致；但 updater/filemanager 进程没有模块日志，updater guard 心跳也不出现
+  （SystemUI 仍正常）。判定为 lspd 内存模块状态未随 OTA 重载。
+- 修法：`adb root` 后
+  `/data/adb/modules/zygisk_lsposed/lspctl module disable/enable --user=0 com.betteroriginos`，
+  再重启目标进程；updater 恢复 `updater guard installed hooks=22` + `alive` 心跳。
+  注意 `lspctl` 在 Magisk 模块目录、不在 PATH，scope 修改要求 ADB root shell（su 会被拒）。
+- 新增模块级调试模式：信息页「调试」→「调试模式」，键 `betteroriginos_debug`；
+  打开后 updater guard 每 60 秒输出 `updater guard alive pid=… hooks=… enabled=… blocks=…`，
+  关闭后 2 秒内静默。验证后已置 0。

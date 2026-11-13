@@ -260,3 +260,24 @@ adb shell 'am broadcast -a com.vivo.updater.alarm.action.AB_REBOOT_COUNTDOWN -p 
   未确认前不要点正按钮。
 - `PowerManager.reboot` 在 updater/cota 进程里被全局拦截是刻意为之；如果以后要允许
   手动重启，需要给 feature 加选项或先关掉 feature 再重启。
+
+## 8. OTA 后 LSPosed 模块未加载 / 调试模式（2026-11-13，OS 15.2.19.1）
+
+- OTA 后 root 从 KernelSU 换成 Magisk，LSPosed 2.2.1 在 Magisk 下运行；
+  `modules_config.db`（含 WAL）里模块 enabled、scope 六项齐全、APK 路径与 `pm path` 一致。
+- 但 updater/filemanager 进程没有 `loaded com.*` 模块日志，updater guard 心跳也不出现；
+  SystemUI 的模块按用户观察正常。说明 **lspd 内存里的模块状态没有随 OTA/scope 更新重载**，
+  只对已有/部分进程生效。
+- 修法：`adb root` 后执行
+  ```
+  /data/adb/modules/zygisk_lsposed/lspctl module disable --user=0 com.betteroriginos
+  /data/adb/modules/zygisk_lsposed/lspctl module enable  --user=0 com.betteroriginos
+  ```
+  再 force-stop/start updater。实测恢复：
+  `updater guard installed hooks=22` + `updater guard alive pid=… hooks=22 enabled=1 blocks=0`。
+- 注意：`lspctl` 在 Magisk 模块目录，不在 PATH；scope/module 修改要求 **ADB root shell**
+  （production build 需要先 `adb root` 成功），`su -c` 会被拒。
+- **调试模式**：模块信息页新增「调试」分组 →「调试模式」开关，键
+  `Settings.Global betteroriginos_debug`；打开后 updater guard 每 60 秒打一条
+  `updater guard alive pid=… hooks=… enabled=… blocks=…`，关闭后 2 秒内静默。
+  验证完已置 0。

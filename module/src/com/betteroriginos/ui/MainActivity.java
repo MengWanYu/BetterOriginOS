@@ -12,7 +12,9 @@ import android.widget.Toast;
 import com.betteroriginos.R;
 import com.betteroriginos.core.Feature;
 import com.betteroriginos.core.FeatureManager;
+import com.betteroriginos.core.Prefs;
 import com.betteroriginos.core.SuCommander;
+import com.originui.replica.OriginSwitch;
 
 import java.util.Collections;
 import java.util.LinkedHashSet;
@@ -55,6 +57,15 @@ public class MainActivity extends Activity {
         }
         ((TextView) findViewById(R.id.info_scope)).setText(scopeSummary());
         infoPending = findViewById(R.id.info_pending);
+        OriginSwitch debugSwitch = findViewById(R.id.debug_switch);
+        debugSwitch.setOnCheckedChangeListener(null);
+        debugSwitch.setChecked(Prefs.debugEnabled(this), false);
+        debugSwitch.setOnCheckedChangeListener((button, checked) ->
+                SuCommander.get().write(Prefs.DEBUG_KEY, checked ? "1" : "0", ok -> {
+                    if (!ok) {
+                        Toast.makeText(this, R.string.info_debug_write_failed, Toast.LENGTH_SHORT).show();
+                    }
+                }));
         findViewById(R.id.restart).setOnClickListener(v ->
                 ConfirmDialog.show(this,
                         R.string.dialog_restart_title,

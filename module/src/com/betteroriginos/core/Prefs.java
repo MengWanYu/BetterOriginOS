@@ -18,7 +18,18 @@ public final class Prefs {
     /** optionKey -> legacy global key */
     private static final Map<String, String> LEGACY_OPTION = new HashMap<>();
 
+    /** 模块级调试开关（设置 App 信息页），打开后各进程输出低频诊断日志。 */
+    public static final String DEBUG_KEY = PREFIX + "debug";
+
     private Prefs() {
+    }
+
+    public static boolean debugEnabled(Context ctx) {
+        String value = global(ctx, DEBUG_KEY);
+        if (value == null) {
+            value = local(DEBUG_KEY);
+        }
+        return "1".equals(value) || "true".equals(value);
     }
 
     public static String featureKey(String featureId) {

@@ -52,6 +52,10 @@
     <string name="category_camera">相机</string>
     <string name="category_desktop">桌面</string>
     <string name="category_system">系统</string>
+    <string name="info_debug_section">调试</string>
+    <string name="info_debug_title">调试模式</string>
+    <string name="info_debug_summary">输出低频诊断日志，排查完记得关闭</string>
+    <string name="info_debug_write_failed">调试开关写入失败，请检查 root 授权</string>
     <string name="feature_updater_guard_title">系统升级防护</string>
     <string name="feature_updater_guard_summary">升级包只下载到 Download 并通知路径；不自动安装、不倒计时、不重启（防掉 root）</string>
     <string name="note_updater_guard">开启后安装包只保留在 Download，升级需要你手动处理；关掉“只下载不安装”或整项功能后，需重启升级器才恢复原生流程。</string>
