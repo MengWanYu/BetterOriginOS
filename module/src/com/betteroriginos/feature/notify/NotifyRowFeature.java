@@ -203,6 +203,9 @@ public final class NotifyRowFeature extends Feature {
 
     @Override
     public int supportNoteRes(Context ctx) {
+        if (OsProfile.isOs6OrHigher()) {
+            return R.string.note_notify_os6;
+        }
         return OsProfile.isA13OrLower() ? R.string.note_notify_actions_a13 : 0;
     }
 
@@ -236,6 +239,11 @@ public final class NotifyRowFeature extends Feature {
 
     @Override
     public void install(ClassLoader cl) {
+        if (OsProfile.isOs6OrHigher()) {
+            android.util.Log.i("BetterOriginOS",
+                    "notify_row skipped: OriginOS 6+ (android " + android.os.Build.VERSION.RELEASE + ")");
+            return;
+        }
         sClassLoader = cl;
         ensureGroupRoot();
         try {

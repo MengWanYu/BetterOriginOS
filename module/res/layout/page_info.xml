@@ -108,6 +108,68 @@
                 android:textSize="@dimen/row_summary_size" />
         </LinearLayout>
 
+        <!-- 调试 -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="24dp"
+            android:layout_marginTop="18dp"
+            android:layout_marginBottom="6dp"
+            android:text="@string/info_debug_section"
+            android:textColor="@color/section_label"
+            android:textSize="12sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="@dimen/page_margin"
+            android:layout_marginStart="@dimen/page_margin"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:minHeight="52dp"
+                android:orientation="horizontal"
+                android:paddingBottom="8dp"
+                android:paddingEnd="@dimen/card_pad_h"
+                android:paddingStart="@dimen/card_pad_h"
+                android:paddingTop="8dp">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="12dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/info_debug_title"
+                        android:textColor="@color/text_primary"
+                        android:textSize="@dimen/row_title_size" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="1dp"
+                        android:text="@string/info_debug_summary"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="@dimen/row_summary_size" />
+                </LinearLayout>
+
+                <com.originui.replica.OriginSwitch
+                    android:id="@+id/debug_switch"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:thumbTint="@color/switch_thumb"
+                    android:trackTint="@color/switch_track" />
+            </LinearLayout>
+        </LinearLayout>
+
         <!-- 生效状态 -->
         <TextView
             android:layout_width="wrap_content"
@@ -152,6 +214,57 @@
                 android:paddingStart="@dimen/card_pad_h"
                 android:paddingTop="8dp"
                 android:text="@string/restart_note"
+                android:textColor="@color/text_tertiary"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <!-- 模块注入（OTA 后 LSPosed 可能没有重载模块） -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="24dp"
+            android:layout_marginTop="22dp"
+            android:layout_marginBottom="6dp"
+            android:text="@string/info_inject_section"
+            android:textColor="@color/section_label"
+            android:textSize="12sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="@dimen/page_margin"
+            android:layout_marginStart="@dimen/page_margin"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/info_inject"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="?android:attr/selectableItemBackground"
+                android:minHeight="48dp"
+                android:gravity="center_vertical"
+                android:paddingEnd="@dimen/card_pad_h"
+                android:paddingStart="@dimen/card_pad_h"
+                android:text="@string/info_inject_loading"
+                android:textColor="@color/text_primary"
+                android:textSize="@dimen/row_title_size" />
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginStart="@dimen/card_pad_h"
+                android:background="@color/divider" />
+
+            <TextView
+                android:id="@+id/info_inject_hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingBottom="10dp"
+                android:paddingEnd="@dimen/card_pad_h"
+                android:paddingStart="@dimen/card_pad_h"
+                android:paddingTop="8dp"
+                android:text="@string/info_inject_hint"
                 android:textColor="@color/text_tertiary"
                 android:textSize="11sp" />
         </LinearLayout>

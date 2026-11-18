@@ -26,6 +26,7 @@
 |---|---|---|
 | iQOO Z8 (PD2314) | OriginOS 5 / Android 15、OriginOS 3 / Android 13 | 通知条、媒体卡、相册修复 |
 | vivo Y37 (V2357A) | OriginOS 4 / Android 14 (OS4) | 桌面动效、相机快门、媒体卡 |
+| vivo V2405A (PD2405C) | OriginOS 6 / Android 16 (OS6) | 快照版：媒体卡、升级防护、安装器防护、桌面动效；通知条美化停用 |
 
 要求：
 
@@ -33,7 +34,9 @@
 - 按用途勾选作用域（模块内“作用域”列表可作为参考）：
   `com.android.systemui`、`com.vivo.systemuiplugin`、
   `com.android.providers.media.module`、`com.android.filemanager`、
-  `com.android.camera`、`com.bbk.launcher2`、`com.android.settings`。
+  `com.android.camera`、`com.bbk.launcher2`、`com.android.settings`；
+  OS6 快照版另需：`com.iqoo.media.module`（media.module）、`com.bbk.updater`、
+  `com.android.cota`、`com.android.packageinstaller`。
 
 ## 构建
 

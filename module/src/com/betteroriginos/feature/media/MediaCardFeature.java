@@ -1,5 +1,6 @@
 package com.betteroriginos.feature.media;
 
+import android.animation.ValueAnimator;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -442,6 +443,9 @@ public final class MediaCardFeature extends Feature {
             for (java.util.Map.Entry<View, MediaCard> e : CARDS.entrySet()) {
                 View root = e.getKey();
                 if (root != null && (root == row || isDescendantOf(root, row))) {
+                    if (Boolean.FALSE.equals(mediaSignal(root))) {
+                        continue;
+                    }
                     hits.add(e.getValue());
                 }
             }
@@ -547,6 +551,17 @@ public final class MediaCardFeature extends Feature {
                             // 只挡 known；瞬态 skip（如"动作按钮还没投完"）必须允许重试——
                             // 曾把 empty-actions 的根永久拉黑（SKIP_LOGGED），剥行重建后
                             // 卡片从此补挂不上，可见行只剩原生新内容盖在旧卡上（真机 06:42 序列）。
+                            // 但也不能无限重试：死代根（内容已剥空、永不会再投按钮）会每秒
+                            // 白跑树遍历 + Settings binder 读 + 日志，持续整个面板生命周期
+                            // （真机 00:4x：76 次重试/3s 一次）。每根限 5 次，视图回收即重置。
+                            Integer tries;
+                            synchronized (SWEEP_TRIES) {
+                                tries = SWEEP_TRIES.get(v);
+                                if (tries != null && tries >= 5) {
+                                    continue;
+                                }
+                                SWEEP_TRIES.put(v, tries == null ? 1 : tries + 1);
+                            }
                             if (known) {
                                 continue;
                             }
@@ -584,6 +599,12 @@ public final class MediaCardFeature extends Feature {
         if (v == null || depth > 7) {
             return;
         }
+        // 行会同时挂着两套内容视图（contracted/expanded，一套 GONE）+ 剥行留下的死代：
+        // GONE 的 MediaNotificationView 仍在树里，不查可见性就会把它们当活体反复重试
+        //（真机 00:50：每 3s 两条 attach×skip，共 76+ 次，且每次带 Settings binder 读）。
+        if (v.getVisibility() != View.VISIBLE) {
+            return;
+        }
         // 只认 MediaNotificationView：卡片必须加在它里面。
         // MediaContainerView 是 A13 列表里的外层容器，它自己找不到 media_actions（实测），
         // 传进去只会白跑一次
@@ -599,14 +620,21 @@ public final class MediaCardFeature extends Feature {
         for (int i = 0; i < g.getChildCount(); i++) {
             collectMediaViews(g.getChildAt(i), out, depth + 1);
         }
-        // OS4：展开态模板根没有类名/媒体 id 可认——先递归保证取最内层，
-        // 子树里没有任何更内层的媒体根、而自己能同时探测出 actions+title 才算模板根
-        if (out.size() == before && discoverMedia(g.getContext(), g).complete()) {
+        // OS4：展开态模板根没有类名/媒体 id 可认——先递归取最内层；只有 SBN 明确是
+        // 媒体通知（EXTRA_MEDIA_SESSION / transport）且能探测出 actions+title 才算模板根。
+        if (out.size() == before && Boolean.TRUE.equals(mediaSignal(g))
+                && discoverMedia(g.getContext(), g).complete()) {
             out.add(g);
         }
     }
+    private static final java.util.Set<View> TREE_DUMPED =
+            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<View, Boolean>());
+
     private static final java.util.Set<View> SKIP_LOGGED =
             java.util.Collections.newSetFromMap(new java.util.WeakHashMap<View, Boolean>());
+    /** 补扫对同一根的重试次数（WeakHashMap 随视图回收清零）：死代根限 5 次，之后静默 */
+    private static final java.util.Map<View, Integer> SWEEP_TRIES =
+            new java.util.WeakHashMap<>();
 
     /**
      * 每个视图只报一次早退原因，但一定要报：
@@ -711,6 +739,45 @@ public final class MediaCardFeature extends Feature {
         if (iconId != 0) {
             mv.sourceIcon = root.findViewById(iconId);
         }
+        // OS6 诊断：一次性打印媒体根里的大图（ImageView 图或 View 背景），用来定位真正的封面
+        if (root.getClass().getName().contains("MediaNotificationView")
+                && !TREE_DUMPED.contains(root)) {
+            TREE_DUMPED.add(root);
+            try {
+                java.util.Deque<View> st = new java.util.ArrayDeque<>();
+                st.push(root);
+                int count = 0;
+                while (!st.isEmpty() && count < 60) {
+                    View v = st.pop();
+                    android.graphics.drawable.Drawable d = null;
+                    if (v instanceof ImageView) {
+                        d = ((ImageView) v).getDrawable();
+                    }
+                    if (d == null) {
+                        d = v.getBackground();
+                    }
+                    if (d != null && d.getIntrinsicWidth() >= 200) {
+                        String idName = "?";
+                        try {
+                            idName = ctx.getResources().getResourceEntryName(v.getId());
+                        } catch (Throwable ignored) {
+                        }
+                        Log.i(TAG, "big img id=" + idName
+                                + " cls=" + v.getClass().getSimpleName()
+                                + " w=" + v.getWidth() + " h=" + v.getHeight()
+                                + " int=" + d.getIntrinsicWidth() + "x" + d.getIntrinsicHeight());
+                        count++;
+                    }
+                    if (v instanceof ViewGroup) {
+                        ViewGroup g = (ViewGroup) v;
+                        for (int i = 0; i < g.getChildCount(); i++) {
+                            st.push(g.getChildAt(i));
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
         return mv;
     }
 
@@ -744,6 +811,100 @@ public final class MediaCardFeature extends Feature {
         return best;
     }
 
+    private static volatile String sLastMediaProbe;
+
+    /** 宿主圆角取证只打一轮（一次装机一条，够定位就静默）。 */
+    private static volatile boolean HOST_CORNER_LOGGED;
+
+    /** 诊断：SystemUI 的 logcat 在这台 ROM 上读不到，把媒体判定结果落到一个可读键里。 */
+    private static void probeMedia(String value) {
+        if (value.equals(sLastMediaProbe)) {
+            return;
+        }
+        sLastMediaProbe = value;
+        try {
+            Context ctx = sysuiContext(null);
+            if (ctx != null) {
+                Settings.Global.putString(ctx.getContentResolver(),
+                        "betteroriginos_media_probe", value);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 从通知行读回通知本体；行/字段名各版本略有差异，全部走兜底。 */
+    private static android.app.Notification notificationOf(View v) {
+        View cur = v;
+        for (int i = 0; i < 12 && cur != null; i++) {
+            if (cur.getClass().getName().contains("ExpandableNotificationRow")) {
+                try {
+                    Object entry;
+                    try {
+                        entry = XposedHelpers.callMethod(cur, "getEntry");
+                    } catch (Throwable t) {
+                        entry = XposedHelpers.getObjectField(cur, "mEntry");
+                    }
+                    Object sbn = null;
+                    if (entry != null) {
+                        try {
+                            sbn = XposedHelpers.callMethod(entry, "getSbn");
+                        } catch (Throwable t) {
+                            sbn = XposedHelpers.getObjectField(entry, "mSbn");
+                        }
+                    }
+                    if (sbn != null) {
+                        Object n = XposedHelpers.callMethod(sbn, "getNotification");
+                        if (n instanceof android.app.Notification) {
+                            return (android.app.Notification) n;
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+                return null;
+            }
+            cur = cur.getParent() instanceof View ? (View) cur.getParent() : null;
+        }
+        return null;
+    }
+
+    /** TRUE=媒体 / FALSE=明确非媒体 / null=读不到（读不到时只信模板类名+media_actions） */
+    private static Boolean mediaSignal(View root) {
+        android.app.Notification n = notificationOf(root);
+        if (n == null) {
+            return null;
+        }
+        if (n.extras != null && n.extras.containsKey("android.mediaSession")) {
+            return Boolean.TRUE;
+        }
+        if (android.app.Notification.CATEGORY_TRANSPORT.equals(n.category)) {
+            return Boolean.TRUE;
+        }
+        // 少数播放器不带 session token：用通知模板是否为 MediaStyle 兜底（非媒体不会用它）
+        try {
+            Object tpl = n.getClass().getField("template").get(n);
+            if (tpl != null && tpl.getClass().getName().contains("MediaStyle")) {
+                return Boolean.TRUE;
+            }
+        } catch (Throwable ignored) {
+        }
+        return Boolean.FALSE;
+    }
+
+    /** 已被误建成媒体卡的根：撤回卡片，把标题/按钮等原控件归还模板。 */
+    private void dropStaleCard(View root) {
+        synchronized (CARDS) {
+            MediaCard card = CARDS.remove(root);
+            if (card != null) {
+                try {
+                    card.destroy();
+                } catch (Throwable ignored) {
+                }
+                Log.i(TAG, "media card dropped (non-media root) cls="
+                        + root.getClass().getName());
+            }
+        }
+    }
+
     /** @param expanded 收起态/展开态（A11 两条取色链不同）；null 表示沿用已有状态 */
     private void restyle(View root, Boolean expanded) {
         if (!(root instanceof ViewGroup)) {
@@ -763,6 +924,46 @@ public final class MediaCardFeature extends Feature {
         ImageView art = mv.art;
         ImageView sourceIcon = mv.sourceIcon;
         int headerId = mv.headerId;
+        // “是不是媒体通知”只认通知本身：EXTRA_MEDIA_SESSION（MediaStyle 必带）或
+        // category=transport。旧的“title + action0 父容器”没有任何媒体特征，
+        // A14/A15 上会把配对、下载、系统提示等一切带按钮的大卡片当成媒体行接管。
+        Boolean media = mediaSignal(root);
+        probeMedia("cls=" + root.getClass().getName()
+                + " signal=" + media + " how=" + mv.how
+                + " title=" + (title == null ? "null" : "ok"));
+        if (Boolean.FALSE.equals(media)) {
+            dropStaleCard(root);
+            skipOnce("non-media-sbn", root);
+            return;
+        }
+        if (!Boolean.TRUE.equals(media)
+                && !(root.getClass().getName().contains("MediaNotificationView")
+                && "id".equals(mv.how))) {
+            // 读不到 SBN 时只信“媒体模板类名 + media_actions”，宁可漏建也不误伤
+            dropStaleCard(root);
+            skipOnce("media-unknown", root);
+            return;
+        }
+        // OS6：right_icon 可能只有 144px；通知的 largeIcon 往往是大封面，优先用它
+        try {
+            android.app.Notification notif = notificationOf(root);
+            if (notif != null && notif.getLargeIcon() != null
+                    && (mv.art == null || mv.art.getDrawable() == null
+                    || mv.art.getDrawable().getIntrinsicWidth() < 200)) {
+                android.graphics.drawable.Drawable big =
+                        notif.getLargeIcon().loadDrawable(ctx);
+                if (big != null) {
+                    Log.i(TAG, "largeIcon art candidate=" + big.getIntrinsicWidth()
+                            + "x" + big.getIntrinsicHeight());
+                    if (big.getIntrinsicWidth() >= 200 && mv.art != null) {
+                        mv.art.setImageDrawable(big);
+                        probeMedia("os6_largeIcon=" + big.getIntrinsicWidth() + "x"
+                                + big.getIntrinsicHeight());
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
         if (!mv.complete()) {
             skipOnce("discover=" + mv.how
                     + " actions=" + (actions == null ? "null" : "ok")
@@ -1144,6 +1345,98 @@ public final class MediaCardFeature extends Feature {
     }
 
     /**
+     * 宿主通知卡的圆角。A11 模板本身没有圆角属性（圆角是 A12 才引入的），OS5 上这张卡
+     * 的圆角来自宿主行对子视图的裁剪（clipToOutline = notification_corner_radius）。
+     * OS6 vivo 换了媒体行结构，这层裁剪没了 ⇒ 用户的观感是“A11 播放器四周圆角丢失”。
+     * 读宿主真值（OS5 与 OS6 的 SystemUI 都是 12dp，cmd overlay lookup 实测），读不到才用 12dp。
+     */
+    private static int hostNotificationCornerPx(Context ctx) {
+        Context c = sysuiContext(ctx);
+        if (c == null) {
+            c = ctx;
+        }
+        try {
+            int id = c.getResources().getIdentifier(
+                    "notification_corner_radius", "dimen", "com.android.systemui");
+            if (id != 0) {
+                return Math.round(c.getResources().getDimension(id));
+            }
+        } catch (Throwable ignored) {
+        }
+        return dp(c, 12);
+    }
+
+    /**
+     * 宿主行圆角取证：OS6 用户反馈 A11 卡的 12dp 弧度与通知条不一致，
+     * 说明 vivo 的行圆角不走 systemui 的 notification_corner_radius。
+     * 爬媒体行的祖先链，把每层背景 drawable 的真实圆角打出来（含
+     * NotificationBackgroundView 的 mCornerRadius 字段），拿到真值再换来源。
+     */
+    private static void logHostCorners(View root) {
+        View cur = root;
+        for (int i = 0; i < 10 && cur != null; i++) {
+            try {
+                android.graphics.drawable.Drawable bg = cur.getBackground();
+                String bgDesc = "null";
+                if (bg instanceof GradientDrawable) {
+                    bgDesc = "Gradient r=" + ((GradientDrawable) bg).getCornerRadius();
+                } else if (bg != null) {
+                    bgDesc = bg.getClass().getName();
+                }
+                Log.i(TAG, "hostCorner[" + i + "] " + cur.getClass().getName()
+                        + " clip=" + cur.getClipToOutline() + " bg=" + bgDesc);
+            } catch (Throwable t) {
+                Log.i(TAG, "hostCorner[" + i + "] " + cur.getClass().getName()
+                        + " err=" + t.getClass().getSimpleName());
+            }
+            ViewParent p = cur.getParent();
+            cur = p instanceof View ? (View) p : null;
+        }
+        // vivo 的圆角容器（MediaContainerView / RoundRelativeLayout 这族）：
+        // 类名/字段名每版会变，直接把命中的视图与其数值字段全打出来
+        try {
+            java.util.Deque<View> st = new java.util.ArrayDeque<>();
+            st.push(root);
+            while (!st.isEmpty()) {
+                View v = st.pop();
+                String cn = v.getClass().getName();
+                if (cn.contains("MediaContainer") || cn.contains("RoundRelative")
+                        || cn.contains("NotificationBackgroundView")) {
+                    StringBuilder sb = new StringBuilder("hostCorner vivo ").append(cn);
+                    try {
+                        for (java.lang.reflect.Field f : v.getClass().getDeclaredFields()) {
+                            if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
+                                continue;
+                            }
+                            Class<?> t = f.getType();
+                            f.setAccessible(true);
+                            if (t == float.class) {
+                                sb.append(' ').append(f.getName()).append('=').append(f.getFloat(v));
+                            } else if (t == int.class) {
+                                sb.append(' ').append(f.getName()).append('=').append(f.getInt(v));
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                    android.graphics.drawable.Drawable bg = v.getBackground();
+                    sb.append(" bg=").append(bg == null ? "null" : bg.getClass().getName());
+                    if (bg instanceof GradientDrawable) {
+                        sb.append('r').append(((GradientDrawable) bg).getCornerRadius());
+                    }
+                    Log.i(TAG, sb.toString());
+                }
+                if (v instanceof ViewGroup) {
+                    ViewGroup g = (ViewGroup) v;
+                    for (int i = 0; i < g.getChildCount(); i++) {
+                        st.push(g.getChildAt(i));
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /**
      * 见证日志用的封面尺寸与取色网格。网格必须与 A11 一致（先缩整图再换算 region），
      * 否则量化直方图的像素基数就不同，胜出的 swatch 可能整个换人。
      * region 定义复用 A11Palette.collapsedRegions，避免日志和实际取色分叉。
@@ -1190,6 +1483,8 @@ public final class MediaCardFeature extends Feature {
         final ViewGroup card;
         /** 原生封面视图；OS4 上建卡那一拍可能还没内容，rediscoverArtIfNeeded 会重指 */
         ImageView art;
+        /** OS6：right_icon 实际是应用图标（CachingIconView），不能当封面用 */
+        boolean artIsAppIcon;
         final ImageView artView;
         final SeekBar bar;
         final SeekDrawable seekDrawable;
@@ -1303,6 +1598,8 @@ public final class MediaCardFeature extends Feature {
         }
         View rowBgView;
         Drawable curBg;
+        /** 底色交叉淡入的动画句柄；快速连切时先 cancel 旧的，防止两层 fade 叠加。 */
+        ValueAnimator bgAnimator;
 
         final Runnable ticker = new Runnable() {
             @Override
@@ -1358,6 +1655,8 @@ public final class MediaCardFeature extends Feature {
             this.root = root;
             this.card = card;
             this.art = art;
+            this.artIsAppIcon = art != null
+                    && art.getClass().getName().contains("CachingIconView");
             this.artView = artView;
             this.bar = bar;
             this.seekDrawable = seekDrawable;
@@ -1624,8 +1923,22 @@ public final class MediaCardFeature extends Feature {
                                      : new int[]{0xFFF7DED4, 0xFFFBEADE})
                             : (night ? new int[]{0xFF2A211C, 0xFF211915}
                                      : new int[]{0xFFFDF6EC, 0xFFF8EDE1}));
-            bg.setCornerRadius(a11 ? a11ArtRadiusPx(ctx) : dp(ctx, m3 ? 28 : 24));
+            // a11：圆角照宿主通知卡（OS5 由行裁剪提供，OS6 行不裁了 ⇒ 自己画 + 自己裁），
+            // 封面贴着卡右上角，必须一并被裁成圆角，否则顶角会露出方块。
+            final int a11CornerPx = a11 ? hostNotificationCornerPx(ctx) : 0;
+            bg.setCornerRadius(a11 ? a11CornerPx : dp(ctx, m3 ? 28 : 24));
             card.setBackground(bg);
+            if (a11) {
+                card.setOutlineProvider(new android.view.ViewOutlineProvider() {
+                    @Override
+                    public void getOutline(View v, android.graphics.Outline outline) {
+                        outline.setRoundRect(0, 0, v.getWidth(), v.getHeight(), a11CornerPx);
+                    }
+                });
+                card.setClipToOutline(true);
+                Log.i(TAG, "a11 card corner=" + a11CornerPx
+                        + " dialogCorner=" + hostDialogCornerRadiusPx(ctx));
+            }
 
             // 封面。A11 的 right_icon：scaleType=6=**centerCrop**（§15-4，枚举表核对过），
             // 没有圆角、没有底板、没有阴影；位置在卡片的 TOP|END（§15-3），见下面的装配分支。
@@ -1956,6 +2269,18 @@ public final class MediaCardFeature extends Feature {
                     others.add(b);
                 }
             }
+            if (play == null && next != null) {
+                // desc 认不出播放键时，用动作顺序兜底：播放键通常紧挨在“下一首”前
+                int idx = ordered.indexOf(next);
+                if (idx > 0) {
+                    ImageButton cand = ordered.get(idx - 1);
+                    String d = cand.getContentDescription() == null ? ""
+                            : cand.getContentDescription().toString();
+                    if (!isLyric(d) && !isHeart(d) && !isPrev(d)) {
+                        play = cand;
+                    }
+                }
+            }
             if (prev == null && play == null && next == null && n >= 4) {
                 View a0 = actions.getChildAt(0);
                 View a1 = actions.getChildAt(1);
@@ -1989,6 +2314,33 @@ public final class MediaCardFeature extends Feature {
             //（所以原生这一支没有水波纹层）。颜色 = 正文主色（§5b/§15-8：着色时
             // getActionColor(p) == getPrimaryTextColor(p)）⇒ 原生不存在"按钮压暗到看不清"。
             // AOSP 那一支才是 48dp 方形 + 8dp 内缩 + borderless（有 ripple），记在 A11NotifSpec 里备用。
+            ImageButton synthPrev = null;
+            if (prev == null && next != null) {
+                // OS6 的 vivo 音乐通知里没有“上一首”动作：用 MediaSession 合成一个
+                synthPrev = new ImageButton(ctx);
+                try {
+                    android.graphics.drawable.Drawable d = next.getDrawable() == null ? null
+                            : next.getDrawable().getConstantState().newDrawable().mutate();
+                    if (d != null) {
+                        synthPrev.setImageDrawable(d);
+                        synthPrev.setScaleX(-1f);
+                    } else {
+                        synthPrev.setImageResource(android.R.drawable.ic_media_previous);
+                    }
+                } catch (Throwable t) {
+                    synthPrev.setImageResource(android.R.drawable.ic_media_previous);
+                }
+                synthPrev.setContentDescription("上一首");
+            }
+            if (a11 && synthPrev != null) {
+                // A11 的动作带按通知顺序原样排，合成键插到播放键前（收起/展开共用这份 ordered）
+                int at = ordered.indexOf(play);
+                if (at < 0) {
+                    at = ordered.size();
+                }
+                ordered.add(at, synthPrev);
+                Log.i(TAG, "a11 synth prev at=" + at + " total=" + ordered.size());
+            }
             int ctrlTint = primary;
             if (compact) {
                 for (ImageButton b : ordered) {
@@ -2012,7 +2364,7 @@ public final class MediaCardFeature extends Feature {
                 clp.rightMargin = dp(ctx, A11NotifSpec.DEVICE_ACTIONS_MARGIN_END_DP);
                 column.addView(controls, clp);
             } else {
-                addControl(ctx, controls, prev, 40, ctrlTint);
+                addControl(ctx, controls, prev != null ? prev : synthPrev, 40, ctrlTint);
                 addControl(ctx, controls, play, 44, accent);
                 addControl(ctx, controls, next, 40, ctrlTint);
 
@@ -2074,9 +2426,24 @@ public final class MediaCardFeature extends Feature {
 
             hideOld(ctx, root);
             clearAncestorBackgrounds(root);
+            if (!a11) {
+                logVisibleImages(ctx, root, card);
+                hideResidualImages(root, card);
+            }
 
             MediaCard mc = new MediaCard(root, card, art, artView, bar, seekDrawable, elapsed,
                     total, title, artist, play, sourceView, style, expanded, actions, ordered);
+            if (synthPrev != null) {
+                synthPrev.setOnClickListener(v -> {
+                    try {
+                        if (mc.controller != null) {
+                            mc.controller.getTransportControls().skipToPrevious();
+                        }
+                    } catch (Throwable t) {
+                        Log.w(TAG, "synth prev failed", t);
+                    }
+                });
+            }
             if ("a11".equals(style)) {
                 mc.a11Column = column;
                 mc.a11HeaderName = appName;
@@ -2171,6 +2538,12 @@ public final class MediaCardFeature extends Feature {
             if (root.isAttachedToWindow()) {
                 mc.onAttached();
             }
+            Log.i(TAG, "atomic art: art=" + (art == null ? "null" : art.getClass().getSimpleName())
+                    + " w=" + (art == null ? -1 : art.getWidth())
+                    + " h=" + (art == null ? -1 : art.getHeight())
+                    + " int=" + (art == null || art.getDrawable() == null ? "null"
+                    : art.getDrawable().getIntrinsicWidth() + "x" + art.getDrawable().getIntrinsicHeight())
+                    + " src=" + (sourceIcon == null ? "null" : sourceIcon.getClass().getSimpleName()));
             Log.i(TAG, "atomic card built: prev=" + (prev != null) + " play=" + (play != null)
                     + " next=" + (next != null) + " heart=" + (heart != null)
                     + " source=" + (sourceIcon != null));
@@ -2315,6 +2688,80 @@ public final class MediaCardFeature extends Feature {
             }
         }
 
+        /** OS6：媒体根里会留下原生封面副本与残留按钮，建卡后统一隐藏（不碰我们自己的卡）。 */
+        private static void hideResidualImages(View root, View mine) {
+            try {
+                java.util.Deque<View> st = new java.util.ArrayDeque<>();
+                st.push(root);
+                while (!st.isEmpty()) {
+                    View v = st.pop();
+                    if (v == mine) {
+                        continue;
+                    }
+                    if (v instanceof ImageView && v.getVisibility() == View.VISIBLE) {
+                        // 只藏原生封面的两份副本（实测 int=363 与 320 的大图）。
+                        // 上一版“见 ImageView 就藏”把头部图标一起藏掉，用户报
+                        // “整个播放器不再显示任何图标”；动作按钮（ImageButton）一律不碰。
+                        if (v instanceof ImageButton) {
+                            continue;
+                        }
+                        ImageView iv = (ImageView) v;
+                        Drawable d = iv.getDrawable();
+                        int iw = d == null ? 0 : d.getIntrinsicWidth();
+                        int ih = d == null ? 0 : d.getIntrinsicHeight();
+                        if (iw >= 300 && ih >= 300) {
+                            v.setVisibility(View.GONE);
+                        }
+                        continue;
+                    }
+                    if (v instanceof ViewGroup) {
+                        ViewGroup g = (ViewGroup) v;
+                        for (int i = 0; i < g.getChildCount(); i++) {
+                            st.push(g.getChildAt(i));
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        /** 一次性探针：列出媒体根里仍然可见的 ImageView（排除我们自己的卡），用于定位双重封面。 */
+        private static void logVisibleImages(Context ctx, View root, View mine) {
+            try {
+                java.util.Deque<View> st = new java.util.ArrayDeque<>();
+                st.push(root);
+                int count = 0;
+                while (!st.isEmpty() && count < 16) {
+                    View v = st.pop();
+                    if (v == mine) {
+                        continue;
+                    }
+                    if (v instanceof ImageView && v.getVisibility() == View.VISIBLE) {
+                        ImageView iv = (ImageView) v;
+                        String idName = "?";
+                        try {
+                            idName = ctx.getResources().getResourceEntryName(v.getId());
+                        } catch (Throwable ignored) {
+                        }
+                        Log.i(TAG, "visible iv id=" + idName
+                                + " cls=" + iv.getClass().getSimpleName()
+                                + " w=" + iv.getWidth() + " h=" + iv.getHeight()
+                                + " int=" + (iv.getDrawable() == null ? "null"
+                                : iv.getDrawable().getIntrinsicWidth() + "x"
+                                + iv.getDrawable().getIntrinsicHeight()));
+                        count++;
+                    }
+                    if (v instanceof ViewGroup) {
+                        ViewGroup g = (ViewGroup) v;
+                        for (int i = 0; i < g.getChildCount(); i++) {
+                            st.push(g.getChildAt(i));
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
         private static void hideOld(Context ctx, View root) {
             String[] names = {"notification_media_content", "notification_headerless_view_row",
                     "notification_headerless_view_column", "notification_main_column", "media_actions"};
@@ -2376,8 +2823,10 @@ public final class MediaCardFeature extends Feature {
         }
 
         private static boolean isPlay(String s) {
-            return s.contains("暂停") || s.contains("播放") || s.toLowerCase(Locale.ROOT).contains("pause")
-                    || s.toLowerCase(Locale.ROOT).contains("play");
+            String l = s.toLowerCase(Locale.ROOT);
+            // OS6 的 vivo 音乐把播放/暂停做成 "toggle"；部分播放器用 "play_pause"/"playPause"
+            return s.contains("暂停") || s.contains("播放") || l.contains("pause")
+                    || l.contains("play") || l.contains("toggle");
         }
 
         private static boolean isHeart(String s) {
@@ -2517,26 +2966,164 @@ public final class MediaCardFeature extends Feature {
          *  320ms 淡入期间就是"变淡、短暂看不清"（真机反馈）。 */
         Bitmap pendingArtSrc;
 
+        /** 最近一张“真封面”（宽高都 ≥200 且不是 App 图标）：切歌空窗期留着它。 */
+        Bitmap lastBigArt;
+        /** App 图标指纹（卡片头部那颗 sourceView），命中它的候选一律不当封面。 */
+        int iconArtHash = Integer.MIN_VALUE;
+        /** 非位图封面 Drawable 的栅格化缓存：vivo 切歌时把 right_icon 换成 TransitionDrawable，
+         *  它每帧都在“变”，不缓存就会每帧重栅格化 → 指纹每帧都变 → 反复重染/重淡。 */
+        Drawable lastRasterFrom;
+        Bitmap lastRasterBmp;
+
+        static Bitmap bitmapOf(ImageView v) {
+            if (v == null) {
+                return null;
+            }
+            Drawable d = v.getDrawable();
+            if (d instanceof BitmapDrawable) {
+                return ((BitmapDrawable) d).getBitmap();
+            }
+            return drawableToBitmap(d);
+        }
+
+        /** 头部那颗 sourceView 的 Drawable 身份；它的内容换了（重绑）才重算指纹。 */
+        Drawable iconHashFrom;
+
+        int iconHash() {
+            Drawable d = sourceView == null ? null : sourceView.getDrawable();
+            if (d != null && d != iconHashFrom) {
+                Bitmap b = bitmapOf(sourceView);
+                iconArtHash = b == null ? 0 : artHash(b);
+                iconHashFrom = d;
+            }
+            return iconArtHash == Integer.MIN_VALUE ? 0 : iconArtHash;
+        }
+
+        boolean isAppIcon(Bitmap b) {
+            int ih = iconHash();
+            return b != null && ih != 0 && artHash(b) == ih;
+        }
+
+        Bitmap rememberArt(Bitmap b) {
+            if (b != null && !b.isRecycled() && b.getWidth() >= 200 && b.getHeight() >= 200) {
+                // 必须自持一份拷贝：这张图的原件（metadata/Icon 解出的）会在快速连切时
+                // 被外部 recycle，hold 兜底一旦踩到 recycled 位图就画不出封面，
+                // 整卡只剩纯色底（用户实测：快速连切背景全纯色）。
+                try {
+                    if (!b.sameAs(lastBigArt)) {
+                        Bitmap copy = b.copy(Bitmap.Config.ARGB_8888, false);
+                        if (copy != null) {
+                            lastBigArt = copy;
+                        }
+                    }
+                } catch (Throwable ignored) {
+                    lastBigArt = b;
+                }
+            }
+            return b;
+        }
+
+        Bitmap rasterArt() {
+            if (art == null) {
+                return null;
+            }
+            Drawable d = art.getDrawable();
+            if (d == null || d instanceof BitmapDrawable) {
+                return null;
+            }
+            if (d instanceof TransitionDrawable) {
+                // vivo 切歌那一拍把它塞进 right_icon：每帧都是不同中间帧，
+                // 栅格化出来是一张会变色的废图（真机 17:14 连发几十条 fade、背景闪黑）
+                return null;
+            }
+            if (d == lastRasterFrom) {
+                return lastRasterBmp;
+            }
+            Bitmap b = drawableToBitmap(d);
+            lastRasterFrom = d;
+            lastRasterBmp = b;
+            return b;
+        }
+
+        /**
+         * OS6 真机证据（NetEase，2026-11-18）：切歌那一拍模板 right_icon 里是 **108px 的 App 图标**
+         * （hash 恒为 3a926fa3，跨歌曲不变），随后还会被 vivo 换成 TransitionDrawable（256px，
+         * 每帧都不同）。旧实现优先拿视图图，于是整卡底色变成“App 图标色”（网易云红/黑）——
+         * 用户报的“切歌时整体播放器背景变成音乐 App 图标”。修法三层：
+         *   1) 先在候选里认 App 图标（指纹 = 我们卡头部那颗 sourceView），命中即弃；
+         *   2) 非位图 Drawable 只在身份变化时栅格化一次（缓存），不再逐帧取色；
+         *   3) 这一拍真没有封面时保留上一张 ≥200 的真封面（用户要的“上个歌曲封面”），
+         *      而不是 App 图标、也不是空白。
+         */
         Bitmap artSource() {
             Bitmap pending = pendingArtSrc;
-            if (pending != null && !pending.isRecycled()) {
-                pendingArtSrc = null;
-                artFrom = "pending";
-                return pending;
+            pendingArtSrc = null;
+            if (pending != null && pending.isRecycled()) {
+                pending = null;
             }
-            Bitmap fromView = viewArtBitmap(art);
-            if (fromView != null) {
+            Bitmap metaNow = controller == null ? null : metadataArt(controller.getMetadata());
+            if (metaNow != null && metaNow.isRecycled()) {
+                // metadata 解出的位图也可能在切歌窗口被回收，绝不能让它流进取色/浮雕
+                metaNow = null;
+            }
+            if (pending != null
+                    && pending.getWidth() >= 200 && !isAppIcon(pending)) {
+                artFrom = "pending";
+                return rememberArt(pending);
+            }
+            Bitmap fromView = artIsAppIcon ? null : viewArtBitmap(art);
+            if (fromView != null && (fromView.isRecycled() || isAppIcon(fromView))) {
+                fromView = null;
+            }
+            if (fromView != null && fromView.getWidth() >= 200) {
                 artFrom = "largeIcon";
+                return rememberArt(fromView);
+            }
+            // OS6 真封面在会话 metadata（363px）；OS5 上 metadata 可能滞后一首，
+            // 但只有“视图图偏小/没有”时才会走到这里，那时仍是它更可靠。
+            if (metaNow != null) {
+                artFrom = fromView != null ? "metadataSmallView"
+                        : (pending != null ? "metadataAfterIcon" : "metadata");
+                return rememberArt(metaNow);
+            }
+            // 视图图偏小（OS6 的 144/108 App 图标、以及小缩略图都会走到这里）：
+            // 手上有上一张真封面就留着它 —— 用户要的是“上个歌曲封面”，不是图标也不是黑。
+            if (fromView != null) {
+                Bitmap hold0 = lastBigArt;
+                if (hold0 != null && !hold0.isRecycled()) {
+                    artFrom = "holdSmallView";
+                    return hold0;
+                }
+                // OS6 的 right_icon 就是这个 App 的图标位（NetEase 实测 144/108px，
+                // 换歌时还会被塞成图标）：没有比它更大的来源时宁可不画，也不把它当封面。
+                if (OsProfile.isOs6OrHigher() || artIsAppIcon) {
+                    artFrom = "iconSkip";
+                    return null;
+                }
+                artFrom = "largeIconSmall";
                 return fromView;
             }
-            Bitmap raster = art == null ? null : drawableToBitmap(art.getDrawable());
-            if (raster != null) {
+            Bitmap raster = rasterArt();
+            if (raster != null && !raster.isRecycled() && !isAppIcon(raster)) {
                 artFrom = "largeIconDrawn";
-                return raster;
+                return rememberArt(raster);
             }
-            Bitmap meta = controller == null ? null : metadataArt(controller.getMetadata());
-            artFrom = meta != null ? "metadata" : "none";
-            return meta;
+            Bitmap hold = lastBigArt;
+            if (hold != null && !hold.isRecycled()) {
+                artFrom = "hold";
+                return hold;
+            }
+            if (pending != null && !isAppIcon(pending)) {
+                // 到这里还没有比它更大的来源；OS6 这条 pending 同样来自 right_icon 图标位
+                if (OsProfile.isOs6OrHigher()) {
+                    artFrom = "iconSkip";
+                    return null;
+                }
+                artFrom = "pendingSmall";
+                return pending;
+            }
+            artFrom = "none";
+            return null;
         }
 
         static float dominantHue(Bitmap bmp) {
@@ -2721,14 +3308,66 @@ public final class MediaCardFeature extends Feature {
             }
         }
 
+        /**
+         * 底色交叉淡入。原来的 TransitionDrawable 只在通知面板真的有绘制帧时才推进，
+         * 空闲面板上会冻结在第 0 帧（旧底色），直到 1~2 秒后某个别的绘制帧把它一次性
+         * 画到终态——用户看到的“封面已经换成新歌、左半底色慢半拍才跳变”就是这个。
+         * 改成 ValueAnimator（Choreographer 逐帧）驱动：动画每帧主动推进 fraction，
+         * 和封面那侧 artView.animate() 同一套帧驱动，两边永远同步。
+         */
+        static final class FadeBgDrawable extends Drawable {
+            final Drawable from;
+            final Drawable to;
+            int fadeAlpha;
+
+            FadeBgDrawable(Drawable from, Drawable to) {
+                this.from = from;
+                this.to = to;
+            }
+
+            void setFadeAlpha(int a) {
+                fadeAlpha = a;
+                invalidateSelf();
+            }
+
+            @Override
+            public void draw(Canvas canvas) {
+                from.draw(canvas);
+                if (fadeAlpha > 0) {
+                    to.setAlpha(fadeAlpha);
+                    to.draw(canvas);
+                }
+            }
+
+            @Override
+            public void setAlpha(int alpha) {
+            }
+
+            @Override
+            public void setColorFilter(ColorFilter cf) {
+            }
+
+            @Override
+            public int getOpacity() {
+                return PixelFormat.TRANSLUCENT;
+            }
+        }
+
         void applyPalette(boolean animate, Bitmap bmp) {
             try {
+                if (bmp != null && bmp.isRecycled()) {
+                    bmp = null;
+                }
                 Context ctx = card.getContext();
                 boolean night = isNight(ctx);
                 Bitmap src = bmp != null ? bmp : artSource();
                 int h = artHash(src);
-                String artKey = h + "/" + style + "/" + (expanded ? "e" : "c")
-                        + (night ? "n" : "l");
+                // artKey 必须带会话态：建卡那一拍 session 未绑（黑底兜底、colorized=0），
+                // 会话绑上后同一封面的取色结果完全不同（黑底 → 封面色）——
+                // 不加这一位，bind 后的 refreshColors 会被这里的去重早退拦下，
+                // 黑底滞留到下一首歌（真机 00:21 酷狗序列：session 绑上后无任何 retint）。
+                String artKey = h + "/s" + (controller != null ? 1 : 0) + "/" + style + "/"
+                        + (expanded ? "e" : "c") + (night ? "n" : "l");
                 if (h != 0 && artKey.equals(lastArtKey) && curBg != null) {
                     return;
                 }
@@ -2771,9 +3410,10 @@ public final class MediaCardFeature extends Feature {
                     a11CardBg = base;
                     accent = fg;
                     GradientDrawable g = new GradientDrawable();
-                    // A11 的行背景还是 9-patch：framework-res 与 SystemUI 资源表里
-                    // dimen/notification_corner_radius 命中数都是 0（圆角是 A12 才加的）⇒ 半径 0
-                    g.setCornerRadius(0f);
+                    // A11 模板本身没有圆角属性；OS5 上卡片的圆角来自宿主行裁剪
+                    // （notification_corner_radius=12dp）。OS6 的媒体行不再裁我们的卡，
+                    // 所以这里自己按宿主真值画（并与建卡时的 outline 裁剪一致）。
+                    g.setCornerRadius(hostNotificationCornerPx(ctx));
                     g.setColor(base);
                     newBg = g;
                     Log.i(TAG, "a11 palette state=" + (expanded ? "expanded" : "collapsed")
@@ -2824,18 +3464,45 @@ public final class MediaCardFeature extends Feature {
                     accent = night ? 0xFFF07A64 : 0xFFE0503A;
                 }
                 if (animate && curBg != null && card.isAttachedToWindow()) {
-                    TransitionDrawable td = new TransitionDrawable(new Drawable[]{curBg, newBg});
-                    td.setCrossFadeEnabled(true);
-                    card.setBackground(td);
-                    td.startTransition(320);
-                    // TransitionDrawable 只在被绘制时推进：闲置面板没有后续绘制，
-                    // 过渡冻结在第 0 帧（旧底/黑），用户看到的就是"切歌后左边黑"。
-                    // 过渡结束后补一次 invalidate，画到终态（真机 06:5x 帧对照证实）。
-                    card.postInvalidateDelayed(340);
+                    // 快速连切：把上一个没放完的过渡直接拉到终态，避免层叠
+                    if (bgAnimator != null) {
+                        bgAnimator.cancel();
+                        bgAnimator = null;
+                    }
+                    Drawable fromBg = curBg;
+                    if (fromBg instanceof FadeBgDrawable) {
+                        FadeBgDrawable prev = (FadeBgDrawable) fromBg;
+                        prev.setFadeAlpha(255);
+                        fromBg = prev.to;
+                    }
+                    final FadeBgDrawable fd = new FadeBgDrawable(fromBg, newBg);
+                    card.setBackground(fd);
+                    curBg = fd;
+                    bgAnimator = ValueAnimator.ofInt(0, 255);
+                    bgAnimator.setDuration(320);
+                    bgAnimator.addUpdateListener(a -> {
+                        fd.setFadeAlpha((Integer) a.getAnimatedValue());
+                    });
+                    bgAnimator.addListener(new android.animation.AnimatorListenerAdapter() {
+                        @Override
+                        public void onAnimationEnd(android.animation.Animator animation) {
+                            // 终态落回纯新底色；期间若 curBg 仍指向 fd，一并换掉
+                            if (card.getBackground() == fd) {
+                                card.setBackground(newBg);
+                            }
+                            if (curBg == fd) {
+                                curBg = newBg;
+                            }
+                            if (bgAnimator == animation) {
+                                bgAnimator = null;
+                            }
+                        }
+                    });
+                    bgAnimator.start();
                 } else {
                     card.setBackground(newBg);
+                    curBg = newBg;
                 }
-                curBg = newBg;
                 if (a11) {
                     // §15-7 `updateSeekBarTint` 原文：thumb / progress / track = **同一个** originalIconColor
                     // 的 255 / 192 / 128 三档 alpha；§15-8 又证明着色时 originalIconColor == 正文主色。
@@ -2907,6 +3574,10 @@ public final class MediaCardFeature extends Feature {
                     // 底色变了就必须重做封面浮雕（右缘淡出的终点 = 卡片底色），
                     // 否则"换歌 / 切深浅色"之后那条边会露出硬界（11-04 早上的反馈）。
                     syncArt();
+                    if (!HOST_CORNER_LOGGED) {
+                        HOST_CORNER_LOGGED = true;
+                        logHostCorners(root);
+                    }
                 } else if (m3) {
                     int barFill = accent;
                     int trackColor = Color.argb(night ? 0x33 : 0x2E,
@@ -3002,6 +3673,18 @@ public final class MediaCardFeature extends Feature {
          */
         void applyArtSwap(Drawable prev, Drawable next, boolean animated) {
             try {
+                // 旧/新任一方的 bitmap 被外部 recycle（快速连切时 NetEase/vivo 会回收
+                // 上一首的 largeIcon），交叉淡就会画出一张空层：整卡只剩纯色底。
+                // 回收的那一侧直接按“没有上一张”处理，退化为 alpha 淡入/硬上。
+                if (prev instanceof BitmapDrawable
+                        && ((BitmapDrawable) prev).getBitmap().isRecycled()) {
+                    prev = null;
+                }
+                if (next instanceof BitmapDrawable
+                        && ((BitmapDrawable) next).getBitmap().isRecycled()) {
+                    Log.i(TAG, "a11 art swap next recycled, skip");
+                    return;
+                }
                 if (!animated) {
                     // 同一张图只是按新底色重染左边那层色调：直接替换。再淡一次会把正在跑的
                     // 过渡重启，用户看到的就是"旧封面突然消失"那种硬跳（11-04 午后的实测）
@@ -3012,6 +3695,11 @@ public final class MediaCardFeature extends Feature {
                     return;
                 }
                 if (prev != null) {
+                    // cross 前必须把 alpha 恢复 1：前一次 mode=in 可能只跑到一半
+                    // （alpha 还停在接近 0），cross 直接 setImageDrawable 不会重置 alpha，
+                    // 结果新封面画在 alpha≈0 的视图上 = 整卡只剩纯色底（用户实测复现）。
+                    artView.animate().cancel();
+                    artView.setAlpha(1f);
                     TransitionDrawable td =
                             new TransitionDrawable(new Drawable[]{prev, next});
                     // 与卡片背景那次过渡同一套调用（startFade 在本机 android.jar 里没有）
@@ -3042,6 +3730,14 @@ public final class MediaCardFeature extends Feature {
                 }
                 // 与取色同一个来源解析（通知自带 largeIcon 优先，metadata 兜底）
                 Bitmap pick = artSource();
+                if (pick != null && pick.isRecycled()) {
+                    // 快速切歌窗口里外部位图可能刚到手就被 recycle：按“无源”处理，
+                    // 让自持拷贝的 hold 兜底，绝不把 recycled 位图交给浮雕/取色
+                    Log.i(TAG, "art pick recycled, drop " + artFrom);
+                    pick = null;
+                }
+                Log.i(TAG, "art pick=" + artFrom + (pick == null ? " null"
+                        : " " + pick.getWidth() + "x" + pick.getHeight()));
                 int h = artHash(pick);
                 // 缓存键含底色：A11 的"封面右缘淡出进底色"要求浮雕底色 == 卡片底色，
                 // 只按封面 hash 去重会让"换歌/换深浅色后底色变了"的那一轮仍然拿着旧底色，
@@ -3571,10 +4267,13 @@ public final class MediaCardFeature extends Feature {
         void watchArtArrival() {
             try {
                 Drawable d = art == null ? null : art.getDrawable();
-                // 只走零拷贝那条（BitmapDrawable）算指纹：非位图的那一类每秒栅格化太贵，
-                // 交给 Drawable 身份比较兜底
+                // 只认**像素指纹**变化（零拷贝那条，BitmapDrawable）。
+                // OS6 真机（21:02 连切）证实：vivo 会把 right_icon 反复换成不同的 Drawable
+                // 包装（TransitionDrawable/Icon/清空），同一张图的像素指纹不变——按“身份变了
+                // 就重染”会让同一首歌在 30ms 内被 relief+cross 四五次，底色/封面互相重启，
+                // 这就是用户看到的“左右不同步”与“快速切歌背景变纯色”（硬切打断动画）。
                 int h = artHash(viewArtBitmap(art));
-                if (d == lastArtDrawableSeen && h == lastArtHashSeen) {
+                if (h == lastArtHashSeen) {
                     return;
                 }
                 boolean known = lastArtDrawableSeen != null || d == null;
@@ -3590,15 +4289,15 @@ public final class MediaCardFeature extends Feature {
                     lastTrackKey = "";
                 }
                 // 顺序必须是**先取色、后画封面**：A11 的浮雕要用卡片底色做右缘淡出的终点，
-                // 反过来就会先拿旧底色画一张、320ms 淡入跑到一半又被新底色那张重启
-                // （真机见证：同一次切歌里 relief color=ffffffff → 24ms 后 color=ff103808，
-                // 两条 a11 art fade 相隔 24ms）——用户看到的"还是生硬切换"就是这个重启。
+                // 反过来就会先拿旧底色画一张、320ms 淡入跑到一半又被新底色那张重启。
                 // 先取色后画封面：把**新**封面交给取色（pendingArtSrc），
                 // 否则 refreshColors 里 artSource() 读到的还是上一首，按钮着色慢一档。
                 if (d instanceof android.graphics.drawable.BitmapDrawable) {
                     pendingArtSrc = ((android.graphics.drawable.BitmapDrawable) d).getBitmap();
                 }
-                refreshColors(false);
+                // 走动画路径：这里的取色变化同样是“切歌”的一部分，底色必须与封面同步淡入；
+                // 走 false 会硬切成纯色，打断正在进行的 FadeBg（用户报“快速切歌背景纯色”）。
+                refreshColors(true);
                 syncArt();
             } catch (Throwable ignored) {
             }

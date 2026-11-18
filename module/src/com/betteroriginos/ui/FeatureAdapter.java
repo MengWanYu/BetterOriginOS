@@ -200,7 +200,7 @@ public class FeatureAdapter extends BaseAdapter {
         final ImageView image = row.findViewById(R.id.preview_image);
         final View loading = row.findViewById(R.id.preview_loading);
         final Feature feature = item.feature;
-        boolean enabled = Prefs.featureEnabled(act, feature.id(), feature.defaultEnabled());
+        boolean enabled = Prefs.featureEnabledNow(act, feature.id(), feature.defaultEnabled());
         row.setAlpha(enabled ? 1f : 0.45f);
         previewRows.put(feature.id(), row);
         if ("notify".equals(feature.previewKind())) {
@@ -269,31 +269,52 @@ public class FeatureAdapter extends BaseAdapter {
         ((TextView) card.findViewById(R.id.feature_title)).setText(feature.titleRes());
         ((TextView) card.findViewById(R.id.feature_summary)).setText(feature.summaryRes());
         TextView note = card.findViewById(R.id.feature_note);
-        int noteRes = feature.supportNoteRes(act);
-        if (noteRes != 0) {
-            note.setText(noteRes);
+        CharSequence dynamicNote = feature.noteText(act);
+        if (dynamicNote != null && dynamicNote.length() > 0) {
+            note.setText(dynamicNote);
             note.setVisibility(View.VISIBLE);
         } else {
-            note.setVisibility(View.GONE);
+            int noteRes = feature.supportNoteRes(act);
+            if (noteRes != 0) {
+                note.setText(noteRes);
+                note.setVisibility(View.VISIBLE);
+            } else {
+                note.setVisibility(View.GONE);
+            }
         }
 
         View options = card.findViewById(R.id.feature_options);
         View divider = card.findViewById(R.id.feature_divider);
         OriginSwitch featureSwitch = card.findViewById(R.id.feature_switch);
         final View cardView = card;
-        final boolean enabled = Prefs.featureEnabled(act, feature.id(), feature.defaultEnabled());
+        final boolean enabled = Prefs.featureEnabledNow(act, feature.id(), feature.defaultEnabled());
         featureSwitch.setOnCheckedChangeListener(null);
         featureSwitch.setChecked(enabled, false);
         featureSwitch.setOnCheckedChangeListener((button, checked) -> {
-            SuCommander.get().write(Prefs.featureKey(feature.id()), checked ? "1" : "0",
-                    ok -> act.onWriteResult(ok));
             setOptionsEnabled(cardView, checked);
             View preview = previewRows.get(feature.id());
             if (preview != null) {
                 preview.setAlpha(checked ? 1f : 0.45f);
             }
+            SuCommander.get().write(Prefs.featureKey(feature.id()), checked ? "1" : "0",
+                    ok -> {
+                        act.onWriteResult(ok);
+                        if (ok) {
+                            notifyDataSetChanged();
+                        }
+                    });
         });
         // 开关只由 Switch 控件本身切换，整行点击不触发（避免无提示误触）
+
+        TextView action = card.findViewById(R.id.feature_action);
+        int actionLabel = feature.actionLabelRes();
+        if (actionLabel != 0) {
+            action.setText(actionLabel);
+            action.setVisibility(View.VISIBLE);
+            action.setOnClickListener(v -> feature.onAction(act));
+        } else {
+            action.setVisibility(View.GONE);
+        }
 
         List<FeatureOption> opts = feature.options();
         if (opts.isEmpty()) {
@@ -328,18 +349,23 @@ public class FeatureAdapter extends BaseAdapter {
                                   final FeatureOption opt) {
         View row = inflater.inflate(R.layout.item_option_choice, parent, false);
         ((TextView) row.findViewById(R.id.option_title)).setText(opt.titleRes);
-        ((TextView) row.findViewById(R.id.option_summary)).setText(opt.summaryRes);
-        String value = Prefs.option(act, feature.id(), opt.key, opt.defaultValue);
+        TextView optSummary = row.findViewById(R.id.option_summary);
+        CharSequence dynSummary = feature.optionNote(act, opt.key);
+        optSummary.setText(dynSummary != null && dynSummary.length() > 0
+                ? dynSummary : act.getString(opt.summaryRes));
+        String value = Prefs.optionNow(act, feature.id(), opt.key, opt.defaultValue);
         updateChoiceRow(row, opt, value);
         row.setOnClickListener(v -> ChoiceDropdown.show(act, row, opt, value,
                 picked -> {
-                    SuCommander.get().write(Prefs.optionKey(feature.id(), opt.key), picked,
-                            ok -> act.onWriteResult(ok));
                     feature.onOptionChanged(opt.key, picked);
                     updateChoiceRow(row, opt, picked);
-                    if (feature.previewKind() != null && opt == previewOption(feature)) {
-                        notifyDataSetChanged();
-                    }
+                    SuCommander.get().write(Prefs.optionKey(feature.id(), opt.key), picked,
+                            ok -> {
+                                act.onWriteResult(ok);
+                                if (ok) {
+                                    notifyDataSetChanged();
+                                }
+                            });
                 }));
         parent.addView(row);
     }
@@ -348,12 +374,21 @@ public class FeatureAdapter extends BaseAdapter {
                                   final FeatureOption opt) {
         View row = inflater.inflate(R.layout.item_option_switch, parent, false);
         ((TextView) row.findViewById(R.id.option_title)).setText(opt.titleRes);
-        ((TextView) row.findViewById(R.id.option_summary)).setText(opt.summaryRes);
+        TextView optSummary = row.findViewById(R.id.option_summary);
+        CharSequence dynSummary = feature.optionNote(act, opt.key);
+        optSummary.setText(dynSummary != null && dynSummary.length() > 0
+                ? dynSummary : act.getString(opt.summaryRes));
         OriginSwitch sw = row.findViewById(R.id.option_switch);
-        sw.setChecked("1".equals(Prefs.option(act, feature.id(), opt.key, opt.defaultValue)), false);
-        sw.setOnCheckedChangeListener((button, checked) ->
-                SuCommander.get().write(Prefs.optionKey(feature.id(), opt.key),
-                        checked ? "1" : "0", ok -> act.onWriteResult(ok)));
+        sw.setChecked("1".equals(Prefs.optionNow(act, feature.id(), opt.key, opt.defaultValue)), false);
+        sw.setOnCheckedChangeListener((button, checked) -> {
+            SuCommander.get().write(Prefs.optionKey(feature.id(), opt.key),
+                    checked ? "1" : "0", ok -> {
+                        act.onWriteResult(ok);
+                        if (ok) {
+                            notifyDataSetChanged();
+                        }
+                    });
+        });
         parent.addView(row);
     }
 

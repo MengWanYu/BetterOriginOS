@@ -23,6 +23,14 @@ public abstract class Feature {
         return null;
     }
 
+    /** 功能卡底部入口行文案；0 表示没有入口。点击后交给 onAction。 */
+    public int actionLabelRes() {
+        return 0;
+    }
+
+    public void onAction(Context ctx) {
+    }
+
     public boolean defaultEnabled() {
         return true;
     }
@@ -34,6 +42,16 @@ public abstract class Feature {
      */
     public int supportNoteRes(Context ctx) {
         return 0;
+    }
+
+    /** 动态说明（优先于 supportNoteRes）：用于展示本机实际预配置/当前状态。 */
+    public CharSequence noteText(Context ctx) {
+        return null;
+    }
+
+    /** 选项行的动态说明（优先于静态 summary）：用于显示该项在本机的预置状态。 */
+    public CharSequence optionNote(Context ctx, String optionKey) {
+        return null;
     }
 
     private List<FeatureOption> optionsCache;

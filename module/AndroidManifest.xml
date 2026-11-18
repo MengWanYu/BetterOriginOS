@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.betteroriginos"
-    android:versionCode="5"
-    android:versionName="0.1.3-beta">
+    android:versionCode="6"
+    android:versionName="0.1.4-snapshot">
 
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
 
@@ -31,6 +31,18 @@
             android:name=".ui.AppDetailActivity"
             android:exported="false"
             android:label="@string/app_name"
+            android:theme="@style/AppTheme" />
+
+        <activity
+            android:name=".ui.SetupActivity"
+            android:exported="false"
+            android:label="@string/setup_title"
+            android:theme="@style/AppTheme" />
+
+        <activity
+            android:name=".ui.UpdaterActivity"
+            android:exported="false"
+            android:label="@string/updater_title"
             android:theme="@style/AppTheme" />
 
         <receiver

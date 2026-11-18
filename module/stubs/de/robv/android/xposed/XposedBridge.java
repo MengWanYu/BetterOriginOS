@@ -18,6 +18,11 @@ public final class XposedBridge {
         throw new UnsupportedOperationException("stub");
     }
 
+    public static XC_MethodHook.Unhook hookMethod(java.lang.reflect.Member method,
+                                                   XC_MethodHook callback) {
+        throw new UnsupportedOperationException("stub");
+    }
+
     /** 运行时由 LSPosed 提供：直接调原方法（用于把易崩的厂商实现包进 try/catch） */
     public static Object invokeOriginalMethod(java.lang.reflect.Member method,
                                               Object thisObject,

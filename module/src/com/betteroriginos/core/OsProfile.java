@@ -38,6 +38,11 @@ public final class OsProfile {
         return Build.VERSION.SDK_INT <= 33;
     }
 
+    /** OriginOS 6 / Android 16 起：通知条结构变化大，通知条美化停用；媒体卡仍兼容。 */
+    public static boolean isOs6OrHigher() {
+        return Build.VERSION.SDK_INT >= 36;
+    }
+
     /** "OriginOS 3 / Android 13 (sdk 33)" 这类可诊断字符串，只用于日志 */
     public static String label() {
         String l = sLabel;
