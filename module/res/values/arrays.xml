@@ -10,5 +10,6 @@
         <item>com.android.settings</item>
         <item>com.bbk.updater</item>
         <item>com.vivo.cota</item>
+        <item>com.android.packageinstaller</item>
     </string-array>
 </resources>

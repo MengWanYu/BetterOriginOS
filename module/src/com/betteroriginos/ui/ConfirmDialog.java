@@ -12,10 +12,17 @@ public final class ConfirmDialog {
 
     public static void show(Activity act, int titleRes, int messageRes,
                             int confirmTextRes, final Runnable onConfirm) {
+        show(act, act.getString(titleRes), act.getString(messageRes),
+                act.getString(confirmTextRes), onConfirm);
+    }
+
+    /** 动态文案版本（按应用/包名拼说明）。 */
+    public static void show(Activity act, CharSequence title, CharSequence message,
+                            CharSequence confirmText, final Runnable onConfirm) {
         OriginOverlays.OriginDialog dialog = new OriginOverlays.OriginDialog(act);
-        dialog.build(act.getString(titleRes), act.getString(messageRes),
+        dialog.build(title, message,
                 act.getString(R.string.dialog_cancel), null,
-                act.getString(confirmTextRes), v -> {
+                confirmText, v -> {
                     if (onConfirm != null) {
                         onConfirm.run();
                     }

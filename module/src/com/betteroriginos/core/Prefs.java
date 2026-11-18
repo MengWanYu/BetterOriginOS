@@ -21,6 +21,14 @@ public final class Prefs {
     /** 模块级调试开关（设置 App 信息页），打开后各进程输出低频诊断日志。 */
     public static final String DEBUG_KEY = PREFIX + "debug";
 
+    /**
+     * 升级器运行期通道：App 写入 "<seq>:<verb>"，updater 进程 2s 轮询执行；
+     * updater 把状态发布到 STATE 键，App 直接读。两端都走 Settings.Global，
+     * 不重启 updater 进程即可生效（命令用 ':' 分隔，写入走 su shell 不能含 '|'）。
+     */
+    public static final String UPDATER_CMD_KEY = PREFIX + "updater_cmd";
+    public static final String UPDATER_STATE_KEY = PREFIX + "updater_state";
+
     private Prefs() {
     }
 
@@ -30,6 +38,56 @@ public final class Prefs {
             value = local(DEBUG_KEY);
         }
         return "1".equals(value) || "true".equals(value);
+    }
+
+    /**
+     * 设置 App 专用：绕开进程内 2s 缓存直接读，写入（su settings put）完成后立刻回读
+     * 才能看到新值。Hook 进程仍用带缓存版本（热路径每秒读）。
+     */
+    public static boolean debugEnabledNow(Context ctx) {
+        String value = globalNow(ctx, DEBUG_KEY);
+        if (value == null) {
+            value = local(DEBUG_KEY);
+        }
+        return "1".equals(value) || "true".equals(value);
+    }
+
+    public static boolean featureEnabledNow(Context ctx, String featureId, boolean defaultValue) {
+        String value = globalNow(ctx, featureKey(featureId));
+        if (value == null) {
+            String legacy = LEGACY_FEATURE.get(featureKey(featureId));
+            if (legacy != null) {
+                value = globalNow(ctx, legacy);
+            }
+        }
+        if (value == null) {
+            value = local(featureKey(featureId));
+        }
+        return value == null ? defaultValue : ("1".equals(value) || "true".equals(value));
+    }
+
+    public static String optionNow(Context ctx, String featureId, String optionKey,
+                                   String defaultValue) {
+        String key = optionKey(featureId, optionKey);
+        String value = globalNow(ctx, key);
+        if (value == null) {
+            String legacy = LEGACY_OPTION.get(key);
+            if (legacy != null) {
+                value = globalNow(ctx, legacy);
+            }
+        }
+        if (value == null) {
+            value = local(key);
+        }
+        return value == null ? defaultValue : value;
+    }
+
+    private static String globalNow(Context ctx, String key) {
+        try {
+            return Settings.Global.getString(ctx.getContentResolver(), key);
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     public static String featureKey(String featureId) {
@@ -48,8 +106,7 @@ public final class Prefs {
         LEGACY_OPTION.put(optionKey(featureId, optionKey), PREFIX + legacyKey);
     }
 
-    public static boolean featureEnabled(Context ctx, String featureId, boolean defaultValue) {
-        String value = global(ctx, featureKey(featureId));
+    public static boolean featureEnabled(Context ctx, String featureId, boolean defaultValue) {        String value = global(ctx, featureKey(featureId));
         if (value == null) {
             String legacy = LEGACY_FEATURE.get(featureKey(featureId));
             if (legacy != null) {

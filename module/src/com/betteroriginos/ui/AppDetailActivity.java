@@ -68,12 +68,7 @@ public class AppDetailActivity extends Activity implements SuCommander.PendingLi
 
         detailPending = findViewById(R.id.detail_pending);
         findViewById(R.id.back).setOnClickListener(v -> finish());
-        findViewById(R.id.restart).setOnClickListener(v ->
-                ConfirmDialog.show(this,
-                        R.string.dialog_restart_title,
-                        R.string.dialog_restart_message,
-                        R.string.restart,
-                        this::restartSystemUi));
+        findViewById(R.id.restart).setOnClickListener(v -> confirmRestart());
         updatePendingText();
     }
 
@@ -107,12 +102,29 @@ public class AppDetailActivity extends Activity implements SuCommander.PendingLi
         }
     }
 
-    private void restartSystemUi() {
-        Toast.makeText(this, R.string.restarting, Toast.LENGTH_SHORT).show();
-        SuCommander.get().restartSystemUi(ok -> {
-            if (!ok) {
-                Toast.makeText(this, R.string.restart_failed, Toast.LENGTH_LONG).show();
+    /** 只重启本页涉及的应用（功能自身 scopes + 页面包名），不再一律重启 SystemUI。 */
+    private void confirmRestart() {
+        final java.util.LinkedHashSet<String> pkgs = new java.util.LinkedHashSet<>();
+        pkgs.add(targetPackage);
+        for (com.betteroriginos.core.Feature f : FeatureManager.forPackage(targetPackage)) {
+            String[] scopes = f.scopes();
+            if (scopes != null) {
+                java.util.Collections.addAll(pkgs, scopes);
             }
-        });
+        }
+        pkgs.remove(null);
+        String list = android.text.TextUtils.join("、", pkgs);
+        ConfirmDialog.show(this,
+                getString(R.string.dialog_restart_packages_title),
+                getString(R.string.dialog_restart_packages_message, list),
+                getString(R.string.restart),
+                () -> {
+                    Toast.makeText(this, R.string.restarting, Toast.LENGTH_SHORT).show();
+                    SuCommander.get().restartPackages(new java.util.ArrayList<>(pkgs), ok -> {
+                        if (!ok) {
+                            Toast.makeText(this, R.string.restart_failed, Toast.LENGTH_LONG).show();
+                        }
+                    });
+                });
     }
 }

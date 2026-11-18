@@ -4362,3 +4362,265 @@ offline-all 24 项绿；a11 卡结构 dump（texts=[80,412] a11 位、header 行
 - 新增模块级调试模式：信息页「调试」→「调试模式」，键 `betteroriginos_debug`；
   打开后 updater guard 每 60 秒输出 `updater guard alive pid=… hooks=… enabled=… blocks=…`，
   关闭后 2 秒内静默。验证后已置 0。
+
+## 2026-11-13（下午）系统升级：仅下载界面 / 外部安装模式 / 运行期通道 / 升级中心
+
+详细逆向与读数：`out/LOG-1113-UPDATER-MODES.md`。
+
+- **不再逐控件改升级页**：updater 自带 VGC 定制“只下载”模式，`v0.a.M()`（= `E(-1)==3`）
+  一处为 true 就切换主按钮文案（`just_download`）、通知按钮（`just_download/background_download`）、
+  下载完成不自动安装（`UpdatePresenter:1182`）。新选项 `custom_ui`（默认开）hook 它，
+  自检命令 `probe` 返回 `customUi=true`。装机 `hooks=26`（新增 `customUi=1 extBind=2 installInduce=1`）。
+- **外部安装模式**（`external_install`，默认开）：hook `android.os.UpdateEngine#bind` 为 no-op，
+  updater 不再是 update_engine 的回调客户端；`bindUpdateEnginCallBackSucced` 仍为 true，
+  不会反复重建引擎。目的是让重启/force-stop updater 不再取消第三方 native apply
+  （11-12 的 62.5% `kUserCanceled`）。**native apply 是否照常走完仍未验证**。
+- **运行期命令/状态通道**（不重启 updater）：`betteroriginos_updater_cmd = <seq>:<verb>`
+  （refresh/cancel/probe），updater 2s 轮询；状态写入
+  `betteroriginos_updater_state`（engine/progress/包名/路径/大小/pid/proc…）。
+  `cancel` 直接 `UpdateManager.getUpdateEngine().cancel()`。启动后首个 tick 只取基线，不回放旧命令。
+- **升级中心**：功能卡底部新入口（`Feature.actionLabelRes/onAction`）→ `ui/UpdaterActivity`，
+  显示状态/进度、包路径（复制）、取消安装、刷新、打开系统升级页（intent 必须带
+  `type=application/zip`，vivo 的 filter 带 mimeType）。
+- **注入自检（跨 OTA）**：每个 scope 进程在自己 `shared_prefs/betteroriginos_inject.xml`
+  写 `<pid>:<fingerprint>`；信息页用 `ps -A -o PID,NAME` + root 读回，判
+  “已注入 / 未加载当前模块 / 未运行”；弹窗给 lspctl 两条命令（复制/尝试执行，
+  执行前后都确保 enable，避免把模块留在 disable）。
+- **两个坑**：① 模块 `Class.forName(宿主类)` 抛 CNFE → 必须用 `install()` 传入的宿主
+  ClassLoader（`XposedHelpers.findClassIfExists`），11-12 的 `downloadedPath` 一直靠兜底；
+  ② App 的 mount namespace 里看不到别的 App 的 `/data/user_de|data`，root 也要
+  `nsenter -t 1 -m -- cat`。
+- 实测：`updater guard installed … hooks=26`、`external-install engine-callback unbind`、
+  `custom-ui download-only`、`probe customUi=true`、`cancel sent engine=0`；
+  升级中心 dump：`升级包已下载`、`7.50 GB`、Download 路径；
+  `topResumedActivity=com.bbk.updater/.ui.UpdateActivity`。
+- 待验（等有新版本）：按钮/通知文案真的显示“仅下载”、下载完成不自动安装、
+  第三方 native apply 在 updater 被杀后继续、安装中通知与真实取消。
+
+### 2026-11-13（傍晚）升级中心：获取最新版本全量包
+
+- 服务端检查 API 对“当前版本”始终回 `ret=210 无更新`；把版本字段伪装成上一版
+  （`getSoftVersion/getFullVersion/composeVersionString` 三个 hook，实测都命中）
+  并强制 `isFull=1` 后仍 210 → 该 API 不提供当前版本重下。
+- 有效路线：`updater.xml` 的 `current_download_real_url`（签名直链）仍可用
+  （Range 探测 206，总长 8053346114）；把它伪装成 redir 结果
+  （`getUrlFromGet`/`getResponse`/`decryptResponse` 三个 shim），现造 `UpdateInfo`
+  交给原生下载服务，续传/进度/通知全部复用。
+- 端到端实测：8.05GB 下载完成（17:04），sha256 `01f02afc…` 与升级信息一致；
+  同目录同尺寸 zip 会短路成 `already:`，避免重复 8GB。
+- 修复两个通道缺陷：命令去重改为“值变化”（adb 写过未来 seq 后 App 命令全被忽略）；
+  `:remote` 进程不再执行 fetch/发布状态（避免重复下载与状态来回跳）。
+- 升级中心新增“获取全量包”卡片（开始获取），卡片入口按钮挪到功能卡标题下方（蓝色 pill），
+  不再埋在四个开关下面。
+
+## 2026-11-15 系统安装器净化（installer_guard）
+
+详见 `out/LOG-1115-INSTALLER-GUARD.md`。
+
+- 新 feature `installer_guard`（scope `com.android.packageinstaller`，默认开）：
+  1) 普通安装不再进 vivo `PackageInterceptActivity`（安全守护/未备案/推荐/联网检测），
+     直接改写 startActivity 的目标为 `com.google.packageinstaller.androidq.PackageInstallerActivity`
+     （AOSP 原生页，实测“要安装此应用吗？取消/安装”）；
+  2) adb 安装自动放行：takes `install_app_from_adb=adb` 的 intercept，
+     onCreate/onResume 里调 `AdbInstaller.c()`（setPermissionsResult(true)+finish）；
+  3) `S0.M0.k0()/E0()` 强制 true，关闭身份验证与安装推荐；
+  4) `AdbInstaller.d()`（stop 时发 false）在功能启用时 no-op，消除
+     “包装上了但 adb 报 User rejected”的竞争。
+- 实测：adb 新装 `Success`；手动安装走 AOSP 页并落到 `InstallSuccess`。
+- 坑：jadx 字段名不可靠（按类型找 AdbInstaller）；带 SESSION_ID 的 adb intent 不能改页；
+  onResume 要钩框架 Activity；adb 更新模块自身会被确认页卡住，用 root `pm install`。
+
+- 2026-11-15 追加：adb 安装偶发 `INSTALL_FAILED_ABORTED: User rejected permissions`
+  的真因是拦截页 ViewModel（`T0.g.u -> S0.P0.h0(...,false)`）在放行/结束后异步写 false，
+  与 `c()` 的 true 竞争；不是 App/签名判定。改为只屏蔽“已放行 session”的 false 后，
+  连续 3 次新装 + 更新 + 另一个新包全部 `Success`。
+
+## 2026-11-15 媒体卡误伤非媒体通知（配对/大卡片）
+
+- 现象：配对通知、带按钮的大卡片被套上音乐播放器背景，原控件被搬进卡片后错位。
+- 根因：`collectMediaViews/discoverMedia` 里为 OS4（A14）加的兜底判据
+  “title + action0 的父容器 = 媒体模板”**无版本门槛**；A15 上任何带按钮的大卡片
+  都能满足它，于是被当成媒体行 `restyle`。
+- 修复：非 A14（SDK!=34）必须同时满足 ①根类名含 `MediaNotificationView`
+  ②真的探测到 `media_actions`；A14 保留旧兜底。补扫的“普通 ViewGroup 兜底”同样
+  只在 SDK==34 生效；已误建的卡在判定失败时 `destroy()` 归还控件；
+  `onExpansionChanged` 路径也跳过非媒体根。
+- 结果：SystemUI 重启后非媒体通知不再被接管；真实媒体行仍走
+  `MediaNotificationView + media_actions` 原路径。
+
+- 追加（同日）：OS4 的“title + action0”兜底在大卡片上同样误伤（用户 Y37 实测）。
+  已**彻底移除该判据**；媒体判定改为读行内 SBN 的通知本体：
+  `EXTRA_MEDIA_SESSION` / `category=transport` / 通知模板是 `MediaStyle`；
+  只有读不到 SBN 时才退回“类名含 MediaNotificationView + 真有 media_actions”。
+  探针键 `betteroriginos_media_probe` 正负对照（A15）：
+  `postact` → `cls=FrameLayout signal=false`（跳过）；`postmedia` →
+  `cls=MediaNotificationView signal=true how=id`（建卡）。
+
+## 2026-11-18 OS5 桌面动效解锁 + 预配置状态可视化
+
+- OS5 桌面（15.0.1.680/690）没有 attributes_preconfig.xml，锁点改为
+  `/system/etc/launcher/preconfig.xml` + `k1.b`（LauncherConfig）：
+  - `<animation useNewAnim>`（新过渡链路，本机 false）
+  - `<registeranimation>`（本机 true）
+  - `<wallpaperTargetAnimation>`（本机缺省 → false；MTK 平台不在 e() 自动放行名单）
+  - `<animationGrade>`（本机缺省 → 1）
+  属性解析统一走 `m1.d.a(parser, ns, name, default)`；读取端 `k1.b.A0()/C0()/i()`。
+- 实现（DesktopMotionFeature）：属性钩子强制 true；A0/C0 getter 强制；
+  解析方法（所有参数含 XmlPullParser 的实例方法，兼容 690 改名）后补字段 I/J/K；
+  `e()` 后补 J；`U0()` 后镜像 `support_app_animation_window/vivo_register_animation`。
+  实测探针（桌面 prefs）：attr_useNewAnim=true、A0=true、fields I=true,J=true,K=true、mirror=ok。
+- 功能卡新增**动态预配置说明**（`Feature.noteText` + FeatureAdapter 支持，优先于静态 note）：
+  读取本机 preconfig（OS5/OS4 两个路径），逐项显示“开 / 关（被预置关闭）/ 未配置（默认关）”，
+  并列出系统镜像值与本模块是否已强制解锁。真机显示：
+  `useNewAnim：关（被预置关闭）；registeranimation：开；wallpaperTargetAnimation：未配置（默认关）；
+   animationGrade：未配置（默认 1）；镜像 animation_window=1 · register=1 · enter_exit=3`。
+- 备注：LSPosed 框架重装（Zygisk Next 1.5.3 + Vector 2.2-3119，KernelSU）后，
+  模块开关被清回默认；桌面动效已重新开启。作用域改用 `vector-cli scope`。
+
+- 追加：桌面动效改为**逐项开关**（新过渡链路 / 打开退出动画 / 壁纸缩放）+ 档位选择；
+  `Feature.optionNote(ctx,key)` 让每个开关下方动态显示“预配置 → 本模块”状态
+  （FeatureAdapter 的开关/选择行都支持动态 summary，切换后立即刷新）。
+  Hook 全部按各自选项门控：关闭某项即不再强制该属性/字段/镜像。
+  真机对照：wallpaper_anim=0 时探针 `fields I=true,J=false,K=true wallOn=false raw=app=0`
+  且无 platform 写入；恢复 1 后 `J=true wallOn=true raw=app=1`。
+
+- 壁纸缩放排查（OS5）：`wallpaperTargetAnimation`(J) 只是配置面；
+  真正的运行时门是
+  1) `LauncherEnvironmentManager.f3()` = `u1()==0`（sConfigWPScaleOpt），本机非 0 → 整段壁纸目标动画被跳过；
+  2) `ILauncherInterface.supportLauncherScale()` = `!isDisableLauncherScale() && k1.b.i()==1`；
+  3) `supportWallpaperScale()` = `k1.b.C0()`。
+  **之前把 animationGrade 强写成用户档位(3)正好把 (2) 关掉**。修正：不再改 K，保持预置 1；
+  f3 在壁纸开关开启时强制 true；档位只写 `enter_exit_app_animation`。
+  探针：`fields K=1`、`gate_f3=true`。
+  AOSP 的 app-open 壁纸目标动画在本 build 被 `GestureConfig.USE_WALLPAPER_REMOTE_ANIM_TARGET=false`
+  （static final，编译期内联）裁掉；vivo 自己的缩放链是 app→home 手势路径。
+
+## 2026-11-18 设置体验：开关持久化 / 按应用重启 / 首次引导重做
+
+- **开关关掉又弹回**：写入走 su（异步 250ms），UI 立刻重读时命中 Prefs 进程内 2s 缓存拿到旧值。
+  新增 `Prefs.featureEnabledNow/optionNow/debugEnabledNow`（设置 App 直读、不走缓存），
+  FeatureAdapter 改用它；写入成功后再刷新列表（不再立即重读）。
+- **重启按应用**：`SuCommander.restartPackages(pkgs)`，SystemUI 用 killall、其它用 am force-stop；
+  AppDetail 的右上角重启改为“本页功能 scopes + 页面包”，弹窗列出将重启的包
+  （如升级器页 = updater + cota；桌面页 = launcher2 + settings）。
+- **首次引导重做**：单屏样式（hero + 必须完成 + 可选设置 + 底部主按钮）。
+  硬性要求只有 root；框架/作用域/通知是可选入口。修复框架检测：
+  targetSdk 35 包可见性导致 getPackageInfo 看不到别的包 → 用 root `pm list packages` 兜底；
+  打开管理器在无 launch intent 时用 `monkey -p`。
+
+## 2026-11-18 OriginOS 6（V2405A / Android 16）首轮适配
+
+设备：PD2405C_A_16.1.24.15.W10，SDK 36，KernelSU + LSPosed 2.2.1(7912) API102。
+模块已装最新构建，作用域补齐（systemui/plugin/media/filemanager/camera/launcher2/
+settings/updater/cota/packageinstaller）。
+
+- **通知条美化**：OS6 起不装配（`OsProfile.isOs6OrHigher()`，SDK>=36 直接 return），
+  卡片注记“OS6 不再启用”；实测新进程日志 `notify_row skipped: OriginOS 6+`。
+  **媒体卡**继续可用（`MediaNotificationView` 仍存在，restyle 正常）。
+- **升级器 4.9.29.6**：重启入口 `n0.a.D` → **`l0.a.F(Context,UpdateMethod,boolean)`**；
+  定制仅下载 `v0.a.M()` → **`u0.a.F(-1)==3`**（单例 `u0.a.B()`）。
+  已加兼容 hook：`l0.a.F=1`、`customUi6=1`，`probe customUi(os6)=3`。
+  `UpdateTipsService$c` 方法改成 `a/b/onKey`（夜间计时器冻结暂未适配，安装仍被 startInstall 拦）。
+- **安装器 12.4.1.10.0**（与 OS5 同版本）：`installer guard installed hooks=11`，
+  adb 新装 `Success`，自动放行/拒绝路径均正常。
+- **桌面 16.0.0.773**：配置类 `h2.a`，解析助手 `q1.a`；
+  registeranimation→字段 A/getter `C()`，wallpaperTargetAnimation→字段 C/getter `E()`，
+  useNewAnim→字段 f2067h（仅解析入口）；缩放门仍在 `VivoLauncherHelper$4`
+  的 `supportLauncherScale/supportWallpaperScale`。
+  已加 OS6 适配：`os6 attrs=1 getters=4 parsed=2`，探针 `A=true,C=true`、`getter_C=true`。
+
+## 2026-11-18 OS6 媒体卡适配（阶段收尾，转交接）
+
+- 已完成：OS6 通知条美化停用；升级器 4.9.29.6 新混淆名适配（l0.a.F / u0.a.F，probe=3）；
+  安装器 hooks=11 正常；桌面 16.0.0.773（h2.a/q1.a）适配；媒体卡接通 OS6。
+- 媒体卡本轮修了：toggle→播放键映射、合成“上一首”、封面不再用 right_icon(app icon)、
+  改用会话 metadata 363 大图、小 pending 不覆盖大图。
+- 遗留：**当前版本播放器图标全部不显示**（最可疑：hideResidualImages 隐藏过宽）、
+  双封面残留（180/90 两张原生图）、点收藏多次布局异常、展开/收起无过渡。
+- 已写交接：`out/HANDOFF-1118-OS6-MEDIA.md`（含设备/构建哈希/日志锚点/下一步二分方案）。
+
+## 2026-11-18（晚）OS6 A11 媒体卡：图标当封面 / 圆角 / 上一首 / 无图标回归
+
+用户复现（当前版本、A11 样式）：① 四周圆角丢失；② 切歌时整卡背景变成音乐 App 图标
+而不是上一首封面；③ “上一首”按钮丢失。另有一条此前登记的非 A11 回归：播放器图标全不显示。
+
+### 1. 真机日志直接钉死“App 图标当封面”（NetEase，SystemUI pid 12975）
+
+```
+restyling style=a11 …MediaNotificationView title=盛夏的果实 actions=4 role=contracted
+largeIcon art candidate=144x144
+action[0..3] desc=                      ← 收起态 4 个按钮 desc 全空
+atomic art: art=ImageView w=0 h=0 int=144x144 src=CachingIconView
+a11 palette state=collapsed bg=ff000000 … art=144x144 srcFrom=largeIcon …
+…
+17:14:56 art pick=largeIconDrawn 256x256
+17:14:57 art drawable changed now=TransitionDrawable hash=0   ← 每 ~2ms 一条，连发几十条
+a11 palette … bg=ff000000 srcHash=c2413256/2989be3e/…          ← 每帧一个新指纹
+a11 art fade mode=cross ms=320                                  ← 每帧重启一次淡入
+```
+
+两条独立根因：
+- 切歌那一拍 `right_icon` 里是 **108px 的 App 图标**（`srcHash=3a926fa3` 跨歌曲恒定），
+  metadata 尚未更新的 200~600ms 内 `artSource()` 优先拿视图图 ⇒ 取色/浮雕/整卡底色
+  全变成网易云图标色（实测 `bg=fff83830`，正是图标红）。
+- 之后 vivo 把 `right_icon` 换成 **TransitionDrawable**：非位图路径每帧重新栅格化，
+  指纹每帧都变 ⇒ `refreshColors + syncArt` 逐帧重染、fade 反复重启（背景闪黑/抖动）。
+
+### 2. 修法（全部在 MediaCardFeature，OS6 行为按 `OsProfile.isOs6OrHigher()` 收口）
+
+- `artSource()` 重排：pending(≥200 非图标) → 视图图(≥200 非图标) → **metadata** →
+  小视图（有上一张真封面则 `holdSmallView`；OS6 无大图时 `iconSkip` 直接不画）→
+  raster（**TransitionDrawable 一律不栅格化**，其余按 Drawable 身份缓存一次）→
+  `hold` 上一张 ≥200 真封面 → 小 pending（OS6 视为图标位，同样 skip）。
+- App 图标指纹 `iconHash()`：取卡头部 sourceView 的图，按 Drawable 身份重算；
+  命中即从任何候选里剔除（跨尺寸不同指纹时由 `hold`/`iconSkip` 兜住）。
+- “上一首不再丢失”：`synthPrev` 的合成条件从 `!a11` 放开到全样式；
+  A11 把合成键插进 `ordered` 的播放键之前（收起/展开共用），实测 `a11 synth prev at=1 total=6`
+  （like/prev/toggle/next/trash/lyric）。
+- A11 圆角：宿主 `dimen/notification_corner_radius` 实测 **12dp**
+  （`cmd overlay lookup com.android.systemui com.android.systemui:dimen/notification_corner_radius`
+  → `12.0dip`，OS5/A15 同值）。OS5 上圆角来自宿主行对子视图的裁剪，OS6 vivo 换了媒体行结构
+  不再裁 ⇒ 自己画：A11 背景 `setCornerRadius(12dp)` + 卡片 `ViewOutlineProvider` 圆角
+  `setClipToOutline(true)`（封面贴右上角一并裁圆）。实测日志 `a11 card corner=36`（density 3.0）。
+- 非 A11“无图标”回归（可疑项）：`hideResidualImages` 从“见 ImageView 就藏 / 带 desc 的
+  ImageButton 也藏”缩到**只藏内在宽高均 ≥300 的非 ImageButton**（实测双封面 int=363/320），
+  ImageButton 与头部图标一律不碰。
+
+### 3. 装机中途验证（设备拿走前，构建 6024a44ff437）
+
+- 新卡记录：`a11 card corner=36 dialogCorner=84`、`a11 synth prev at=1 total=6`；
+- 会话绑上后：`art pick=metadataSmallView 363x363`、`a11 palette bg=fff8f0e8`（真封面取色），
+  不再是 144 图标；
+- `cmd media_session dispatch next` 真机切歌仍暴露**残余 240ms**：metadata 未到之前
+  `art pick=largeIconSmall 108x108`（图标）被用了一帧 ⇒ 已补 `holdSmallView`/`iconSkip`，
+  并跳过 TransitionDrawable 栅格化。这部分是 6024a44ff437 之后新加，**尚未装机**。
+
+### 4. 待真机验证（新构建 sha256 前缀 `1ce592461afd`）
+
+1. A11 切歌：整卡背景应保持上一首封面取色直到新封面淡入，全程不出现图标色/黑；
+2. A11 四周圆角 12dp（收起与展开都圆，封面右上角随卡裁圆）；
+3. A11 动作带：like/prev/toggle/next/trash（+歌词），“上一首”可用（skipToPrevious）；
+4. 非 A11（os5/material）播放器图标恢复显示，双封面只剩我们的；
+5. 观察 `art pick=` 日志：切歌期间应只出现 hold/holdSmallView/metadataSmallView，
+   TransitionDrawable 不再触发连续 fade。
+
+## 2026-11-18（夜）OS6 线收口 · 0.1.4-snapshot 发版
+
+- 版本号：versionCode 6 / versionName 0.1.4-snapshot（module/AndroidManifest.xml）。
+- APK：module/build/BetterOriginOS.apk，385,902 B
+  MD5 5e66e518d77c8c3af8c1c8686595c27c
+  SHA-256 3207d5e1507bfd55bbcfa9f0082de47579b270ab5a694fea4b8ef0864a04510a
+- 更新日志：out/CHANGELOG-0.1.4-snapshot.txt（完整版）+ out/CHANGELOG.md 头部小节。
+- 本版包含的媒体卡修改（相对 0.1.3-beta，均在 MediaCardFeature.java）：
+  artSource 重排（pending≥200 → 视图≥200 → metadata → 小视图 hold/iconSkip →
+  raster 跳过 TransitionDrawable → hold 自持拷贝）；App 图标指纹过滤；
+  A11 圆角 12dp + outline 裁剪；全样式合成"上一首"（A11 插播放键前）；
+  hideResidualImages 只藏 ≥300×300 非 ImageButton；底色 FadeBgDrawable
+  （ValueAnimator 驱动）；watchArtArrival 只认像素指纹；applyArtSwap 回收防御
+  （cross 前恢复 alpha、recycled 位图降级）。
+- 遗留（下一版）：A11 圆角弧度与通知条不一致；切歌左右过渡时序未完全对齐；
+  桌面动效档位视觉验收；收藏点击重绑布局异常；展开/收起无过渡；
+  收起态空 desc 按钮的 index 兜底可能错位。
+- 设备 adb 掉线于最后一步装机（4e6666a493d4 未装机验证），发版构建以
+  3207d5e1（含版本号 6）为准；该版本与 ccb3b89b 之后的媒体卡代码一致，
+  仅 manifest 版本号不同。

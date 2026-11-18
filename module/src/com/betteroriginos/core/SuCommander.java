@@ -151,6 +151,51 @@ public final class SuCommander {
         });
     }
 
+    /**
+     * 按包重启：SystemUI 用 killall（系统会自拉起），其它应用用 am force-stop，
+     * 用户下次打开即加载新代码。多个包合成一条 su 命令执行。
+     */
+    public void restartPackages(final List<String> packages, final Result result) {
+        final StringBuilder cmd = new StringBuilder();
+        for (String pkg : packages) {
+            if (pkg == null || pkg.length() == 0) {
+                continue;
+            }
+            if (cmd.length() > 0) {
+                cmd.append("; ");
+            }
+            if ("com.android.systemui".equals(pkg)) {
+                cmd.append("killall com.android.systemui");
+            } else {
+                cmd.append("am force-stop ").append(pkg);
+            }
+        }
+        if (cmd.length() == 0) {
+            if (result != null) {
+                result.onResult(false);
+            }
+            return;
+        }
+        exec.execute(new Runnable() {
+            @Override
+            public void run() {
+                final boolean ok = runSu(cmd.toString());
+                main.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (ok) {
+                            pending.set(0);
+                            notifyPending(0);
+                        }
+                        if (result != null) {
+                            result.onResult(ok);
+                        }
+                    }
+                });
+            }
+        });
+    }
+
     private void notifyPending(int count) {
         for (PendingListener l : listeners) {
             l.onPendingChanged(count);
@@ -168,6 +213,30 @@ public final class SuCommander {
             return p.exitValue() == 0;
         } catch (Throwable t) {
             return false;
+        }
+    }
+
+    /** 阻塞式 su 执行并读回 stdout（pidof / lspctl 这类短命令）；异常与超时都返回空串。 */
+    public static String exec(String command) {
+        try {
+            Process p = new ProcessBuilder("su", "-c", command)
+                    .redirectErrorStream(true).start();
+            long deadline = System.currentTimeMillis() + TIMEOUT_S * 1000;
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            java.io.InputStream in = p.getInputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+                if (System.currentTimeMillis() > deadline) {
+                    break;
+                }
+            }
+            p.waitFor(2, TimeUnit.SECONDS);
+            p.destroy();
+            return new String(out.toByteArray(), "UTF-8").trim();
+        } catch (Throwable t) {
+            return "";
         }
     }
 

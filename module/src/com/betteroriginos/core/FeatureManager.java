@@ -8,6 +8,7 @@ import com.betteroriginos.feature.desktop.DesktopMotionFeature;
 import com.betteroriginos.feature.media.MediaCardFeature;
 import com.betteroriginos.feature.notify.NotifyRowFeature;
 import com.betteroriginos.feature.fileman.FileManagerRenameFeature;
+import com.betteroriginos.feature.installer.InstallerGuardFeature;
 import com.betteroriginos.feature.picker.PickerAlbumsFeature;
 import com.betteroriginos.feature.updater.UpdaterGuardFeature;
 
@@ -29,7 +30,8 @@ public final class FeatureManager {
                     new FileManagerRenameFeature(),
                     new CameraShutterFeature(),
                     new DesktopMotionFeature(),
-                    new UpdaterGuardFeature()
+                    new UpdaterGuardFeature(),
+                    new InstallerGuardFeature()
             ));
 
     private FeatureManager() {
@@ -105,6 +107,30 @@ public final class FeatureManager {
             } catch (Throwable t) {
                 Log.e(TAG, "install " + f.id() + " failed", t);
             }
+        }
+        scheduleInjectionMark(packageName);
+    }
+
+    /** Application 可能还没创建好，4 秒后补一次标记（只影响设置页的自检显示）。 */
+    private static void scheduleInjectionMark(final String packageName) {
+        Runnable mark = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Object app = Class.forName("android.app.ActivityThread")
+                            .getMethod("currentApplication").invoke(null);
+                    if (app instanceof Context) {
+                        InjectionMarker.mark((Context) app, packageName);
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        };
+        try {
+            Log.i(TAG, "injection marker scheduled " + packageName);
+            new android.os.Handler(android.os.Looper.getMainLooper())
+                    .postDelayed(mark, 4000L);
+        } catch (Throwable ignored) {
         }
     }
 

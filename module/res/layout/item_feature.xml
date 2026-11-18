@@ -56,6 +56,21 @@
                 android:textColor="@color/text_tertiary"
                 android:textSize="12sp"
                 android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/feature_action"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/bg_button"
+                android:gravity="center"
+                android:minWidth="112dp"
+                android:minHeight="36dp"
+                android:paddingEnd="18dp"
+                android:paddingStart="18dp"
+                android:textColor="@color/white"
+                android:textSize="13sp"
+                android:visibility="gone" />
         </LinearLayout>
 
         <com.originui.replica.OriginSwitch
